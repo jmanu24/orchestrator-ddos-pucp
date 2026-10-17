@@ -9,3 +9,4 @@ venv/
 *.pem
 *.key
 *.pid
+simulation/output/
