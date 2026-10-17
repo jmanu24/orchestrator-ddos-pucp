@@ -164,6 +164,23 @@ class MitigationAction:
                   network
     pps/bps     : the triggering detection's measured rate — carried
                   through purely for observability (audit records)
+    imsi        : the attacking UE's subscriber identity, for the mobile
+                  domain only — empty until the domain adapter resolves
+                  it from action.src_ip (the only IP DDoSDetectionEngine
+                  ever classified) and hands a resolved copy of this
+                  action to mitigation/mobile_mitigator.py's RCMitigator.
+                  RCMitigator never resolves this itself: an empty imsi
+                  here means the adapter couldn't find one, not "ask the
+                  mitigator to look it up".
+    mac         : the attacking subscriber's MAC (Calling-Station-Id),
+                  for the broadband domain only — same resolve-then-hand-
+                  off split as imsi above, between telemetry/
+                  broadband_adapter.py (resolution) and
+                  mitigation/broadband_mitigator.py's BngMitigator
+                  (actuation). Empty when unresolved — BngMitigator still
+                  terminates the session by src_ip in that case, it just
+                  cannot add the persistent AAA reject marker (see its
+                  own apply() docstring).
     """
     domain: str
     device_id: str
@@ -178,3 +195,5 @@ class MitigationAction:
     in_port: int = 0
     pps: float = 0.0
     bps: float = 0.0
+    imsi: str = ""
+    mac: str = ""

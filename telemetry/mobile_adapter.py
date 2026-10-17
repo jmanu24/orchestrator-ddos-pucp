@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import urllib.error
@@ -7,9 +8,8 @@ from typing import Dict, List, Optional
 import config.settings as settings
 from core.log_format import log_line
 from core.models import TelemetryEvent, MitigationAction
+from mitigation.mobile_mitigator import RCMitigator
 from telemetry.base import DomainAdapter
-
-DEFAULT_RC_COMMAND_QUEUE_PATH = "/tmp/oran_rc_commands.jsonl"
 
 
 class MobileNetworkAdapter(DomainAdapter):
@@ -42,19 +42,14 @@ class MobileNetworkAdapter(DomainAdapter):
     already joins the two halves above server-side, so each row it
     returns maps directly onto one TelemetryEvent.
 
-    Mitigation (apply_mitigation()): the decided block/unblock action is
-    delivered to the Near-RT RIC as a real E2SM-RC Control Request by
-    oran_bridge/rc_actuator_xapp.py (Style 2 / Action 6, slice-level PRB
-    quota on the DU E2 node serving the attacking UE). This adapter keeps
-    two delivery paths, both fed the same command:
-      - a live HTTP POST to that actuator's /rc endpoint
-        (settings.MOBILE_RC_ACTUATOR_URL) -- best-effort, short timeout,
-        so an unreachable RIC never stalls the pipeline cycle;
-      - an append to a JSONL command queue (one line per command), which
-        the offline simulator/analysis consumers tail and which doubles
-        as an audit log.
-    The POST is skipped (queue-only) when MOBILE_RC_ACTUATOR_URL is empty,
-    so this stays usable in environments with no live RIC.
+    Mitigation (apply_mitigation()): this adapter is the only place a
+    src_ip can be resolved back to the subscriber's imsi (MitigationAction
+    only ever carries the IP DDoSDetectionEngine classified). It resolves
+    that identity, hands a copy of the action with action.imsi filled in
+    to mitigation/mobile_mitigator.py's RCMitigator, and returns False
+    without delegating at all if resolution fails -- see RCMitigator's
+    own module docstring for what it does with a resolved action (E2SM-RC
+    Control Request delivery to the Near-RT RIC).
     """
 
     domain_name = "mobile"
@@ -62,18 +57,11 @@ class MobileNetworkAdapter(DomainAdapter):
     def __init__(
         self,
         telemetry_api_url: str = None,
-        rc_command_queue_path: str = DEFAULT_RC_COMMAND_QUEUE_PATH,
-        rc_actuator_url: str = None,
+        mitigator: Optional[RCMitigator] = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.telemetry_api_url = telemetry_api_url or settings.MOBILE_DIST_TELEMETRY_API_URL
-        self.rc_command_queue_path = rc_command_queue_path
-        # None -> take the configured default; pass "" explicitly to force
-        # queue-only (no live RIC push).
-        self.rc_actuator_url = (
-            settings.MOBILE_RC_ACTUATOR_URL if rc_actuator_url is None
-            else rc_actuator_url
-        )
+        self.mitigator = mitigator or RCMitigator(logger=logger)
         # Passed down from the Ryu app (its own self.logger) so every log
         # line across domains shares the same name/format -- defaults to
         # a plain logging.Logger so this stays usable standalone (tests,
@@ -213,7 +201,9 @@ class MobileNetworkAdapter(DomainAdapter):
 
     def apply_mitigation(self, action: MitigationAction) -> bool:
         # The attacking UE is action.src_ip (the real source this domain
-        # reported it under in collect() above).
+        # reported it under in collect() above). This is the only place
+        # that lookup can happen -- RCMitigator is never handed a raw,
+        # unresolved action.
         imsi = self._imsi_by_ip.get(action.src_ip)
         if imsi is None:
             self._logger.warning(log_line(
@@ -222,43 +212,4 @@ class MobileNetworkAdapter(DomainAdapter):
             ))
             return False
 
-        command = {
-            "imsi": imsi,
-            "action": action.action,
-            "duration": action.duration,
-            "attack_type": action.attack_type,
-        }
-
-        with open(self.rc_command_queue_path, "a") as f:
-            f.write(json.dumps(command) + "\n")
-
-        # Live delivery to the RIC's E2SM-RC actuator. Best-effort: a failed
-        # or slow POST is logged but never fails the mitigation or stalls the
-        # pipeline (the command is already durably queued above, and the
-        # orchestrator's hysteresis will re-issue on the next cycle if the UE
-        # keeps attacking). Skipped entirely when no actuator URL is set.
-        if self.rc_actuator_url:
-            self._push_to_actuator(command)
-
-        # No print here -- OrchestrationController already reports this
-        # action through the same MITIGATION dashboard/logger line every
-        # other domain's actions go through (ryu_controller_2.py's
-        # _run_pipeline), so a second, differently-formatted message here
-        # would just be noise.
-        return True
-
-    def _push_to_actuator(self, command: dict) -> None:
-        data = json.dumps(command).encode()
-        req = urllib.request.Request(
-            self.rc_actuator_url, data=data, method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            urllib.request.urlopen(
-                req, timeout=settings.MOBILE_RC_ACTUATOR_TIMEOUT_S).close()
-        except (urllib.error.URLError, OSError) as exc:
-            self._logger.warning(log_line(
-                "mobile", "MITIGATION", "RC_PUSH_FAILED",
-                f"imsi={command.get('imsi')} action={command.get('action')} "
-                f"url={self.rc_actuator_url} err={exc}",
-            ))
+        return self.mitigator.apply(dataclasses.replace(action, imsi=imsi))
