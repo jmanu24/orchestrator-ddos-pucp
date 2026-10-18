@@ -62,6 +62,27 @@ class EnterpriseActivationTests(unittest.TestCase):
         out = self._cycle([_enterprise_flood()])
         self.assertEqual([d.attack_type for d in out], ["UDP_FLOOD"])
 
+    def test_activation_delay_is_time_since_the_first_silent_classification(self):
+        # Each _cycle() call advances the clock by dt (0.5s default) BEFORE
+        # classifying, so the 1st (silently dropped) hit lands at t+0.5,
+        # the 3rd (finally reported) at t+1.5 -- a 1.0s delay, exactly what
+        # the activation hysteresis held this detection back by.
+        self._cycle([_enterprise_flood()])
+        self._cycle([_enterprise_flood()])
+        out = self._cycle([_enterprise_flood()])
+        self.assertAlmostEqual(out[0].activation_delay_s, 1.0)
+
+    def test_activation_delay_keeps_the_true_episode_start_past_the_window(self):
+        # Once activated, the detection keeps being reported every cycle
+        # the attack continues -- activation_delay_s must keep growing
+        # from the episode's real first hit, not reset just because the
+        # window's own hit-trimming dropped that old timestamp from `hits`.
+        self._cycle([_enterprise_flood()])
+        self._cycle([_enterprise_flood()])
+        self._cycle([_enterprise_flood()])                    # reported, delay=1.0
+        out = self._cycle([_enterprise_flood()], dt=2.0)      # still ongoing, well past WINDOW_S
+        self.assertAlmostEqual(out[0].activation_delay_s, 3.0)
+
     def test_data_gap_does_not_reset_the_count(self):
         # A flow-stats gap cycle (no detection) between hits is tolerated:
         # this is "k of a window", not "k consecutive".
@@ -110,10 +131,13 @@ class EnterpriseActivationTests(unittest.TestCase):
                                domains=["enterprise", "bgp"], events=ev_x)
         out = self._cycle([corr])
         self.assertEqual([d.attack_type for d in out], ["MULTIDOMAIN_DISTRIBUTED_ATTACK"])
+        self.assertEqual(out[0].activation_delay_s, 0.0)  # exempt: reported on its first cycle
 
     def test_disabled_when_min_hits_is_one(self):
         with mock.patch.object(settings, "ENTERPRISE_ACTIVATION_MIN_HITS", 1):
-            self.assertEqual(len(self._cycle([_enterprise_flood()])), 1)
+            out = self._cycle([_enterprise_flood()])
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0].activation_delay_s, 0.0)
 
 
 class PeeringActivationTests(unittest.TestCase):

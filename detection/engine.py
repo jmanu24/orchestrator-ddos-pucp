@@ -33,8 +33,14 @@ class DDoSDetectionEngine:
                          through its own domain's real mitigation
                          mechanism for this type, not a single one.
 
-    Confidence is boosted when the same destination is targeted from
-    multiple network domains simultaneously (multidomain attack pattern).
+    Confidence is boosted when the attack's OWN contributing sources
+    (DetectionResult.source_domains) span more than one network domain --
+    never just because the correlated group happens to also contain
+    unrelated, benign traffic from other domains toward the same dst_ip
+    (which multidomain correlation mode routinely does; see
+    MultidomainCorrelator). A single-source detection never gets this
+    boost at all -- by definition it has exactly one contributing source,
+    hence exactly one domain.
     """
 
     # Confidence multiplier when attack spans more than one domain
@@ -64,6 +70,16 @@ class DDoSDetectionEngine:
         # DDOS_DISTRIBUTED, or vary its sources, from one cycle to the next.
         self._clock = clock
         self._activation_hits: Dict[Tuple[str, str, str], List[float]] = {}
+
+        # Same keys as _activation_hits, but never trimmed by the window:
+        # the clock time of this episode's VERY FIRST hit, kept until the
+        # whole key goes stale (see _expire_hits). _activation_hits[key][0]
+        # is not a substitute -- the window trims it away as soon as it
+        # ages out, even while the episode (and the key) is still alive.
+        # This is what lets DetectionResult.activation_delay_s report the
+        # true "how long was this one held back" even many cycles into an
+        # ongoing attack, not just during the first WINDOW_S of it.
+        self._first_hit_at: Dict[Tuple[str, str, str], float] = {}
 
         # src_ip -> consecutive cycles a mobile UE has been over the KPM
         # activation thresholds. The activation half of the mitigation
@@ -108,7 +124,9 @@ class DDoSDetectionEngine:
     def _activated(self, detection: DetectionResult, now: float) -> bool:
         """Activation hysteresis: records this cycle's hit and reports the
         detection only once the domain's MIN_HITS hits fall inside its
-        window. Detections without hysteresis pass through unchanged."""
+        window. Detections without hysteresis pass through unchanged
+        (activation_delay_s stays 0.0 -- see DetectionResult's own
+        docstring)."""
         domain = self._activation_domain(detection)
         if domain is None:
             return True
@@ -116,11 +134,17 @@ class DDoSDetectionEngine:
         if min_hits <= 1:
             return True
 
-        hits = self._activation_hits.setdefault((domain, detection.dst_ip, detection.protocol), [])
+        key = (domain, detection.dst_ip, detection.protocol)
+        self._first_hit_at.setdefault(key, now)
+        hits = self._activation_hits.setdefault(key, [])
         hits.append(now)
         cutoff = now - window_s
         hits[:] = [t for t in hits if t >= cutoff]
-        return len(hits) >= min_hits
+        if len(hits) < min_hits:
+            return False
+
+        detection.activation_delay_s = now - self._first_hit_at[key]
+        return True
 
     def _expire_hits(self, now: float) -> None:
         """Forget (domain, dst, protocol) entries with no hit inside their
@@ -131,6 +155,7 @@ class DDoSDetectionEngine:
         ]
         for key in stale:
             del self._activation_hits[key]
+            self._first_hit_at.pop(key, None)
 
     # ------------------------------------------------------------------
     # Internal classification logic
@@ -270,14 +295,12 @@ class DDoSDetectionEngine:
 
         score = kpm_score if kpm_score is not None else total_pps / threshold
         total_bps = sum(e.bps for e in proto_events)
-        multidomain = len(event.domains) > 1
 
         if is_distributed:
             # No single attacker to scope a switch/port block to — many
             # sources, so the representative is just domain/protocol/port
             # context, picked from whichever event has the most pps.
             representative = self._pick_representative(proto_events)
-            confidence = min(entropy * (self.MULTIDOMAIN_BOOST if multidomain else 1.0), 1.0)
             # See DetectionResult.source_device_ids -- each contributing
             # source's own device_id (e.g. a mobile UE's real gNB), not
             # the single representative event's.
@@ -285,13 +308,17 @@ class DDoSDetectionEngine:
             # See DetectionResult.source_domains -- each contributing
             # source's own domain, built from the SAME protocol-filtered
             # proto_events pps_by_src already came from (not the coarser
-            # event.domains above, which includes unrelated benign
-            # traffic from other domains toward the same dst_ip and
-            # would misclassify a genuinely single-domain flood).
+            # event.domains, which includes unrelated benign traffic from
+            # other domains toward the same dst_ip -- using it here, as
+            # this used to, would both misclassify a genuinely
+            # single-domain flood AND boost its confidence just because a
+            # different domain's unrelated benign baseline shares the
+            # victim this cycle).
             source_domains = {e.src_ip: e.domain for e in proto_events}
+            multidomain = len(set(source_domains.values())) > 1
+            confidence = min(entropy * (self.MULTIDOMAIN_BOOST if multidomain else 1.0), 1.0)
             distributed_attack_type = (
-                "MULTIDOMAIN_DISTRIBUTED_ATTACK" if len(set(source_domains.values())) > 1
-                else "DDOS_DISTRIBUTED"
+                "MULTIDOMAIN_DISTRIBUTED_ATTACK" if multidomain else "DDOS_DISTRIBUTED"
             )
             return DetectionResult(
                 domain=representative.domain,
@@ -303,7 +330,7 @@ class DDoSDetectionEngine:
                 attack_type=distributed_attack_type,
                 score=score,
                 confidence=confidence,
-                sources=list(pps_by_src.keys()),
+                sources=self._blockable_sources(pps_by_src),
                 source_device_ids=source_device_ids,
                 source_domains=source_domains,
                 pps=total_pps,
@@ -318,8 +345,15 @@ class DDoSDetectionEngine:
         dominant_events = [e for e in proto_events if e.src_ip == dominant_src]
         representative = self._pick_representative(dominant_events)
 
-        base_confidence = min(score / 10.0, 1.0)
-        confidence = min(base_confidence * (self.MULTIDOMAIN_BOOST if multidomain else 1.0), 1.0)
+        # No MULTIDOMAIN_BOOST here -- a single-source detection is, by
+        # construction, attributed to exactly one domain (dominant_src's
+        # own), never more than one. event.domains (the correlated
+        # group's full domain set, which in multidomain-correlation mode
+        # also includes unrelated benign traffic from the other domains
+        # sharing this dst_ip) must never be read as "this attack spans
+        # domains" -- see the is_distributed branch above for where that
+        # used to happen and why it was wrong.
+        confidence = min(score / 10.0, 1.0)
 
         return DetectionResult(
             domain=representative.domain,
@@ -335,6 +369,23 @@ class DDoSDetectionEngine:
             pps=total_pps,
             bps=total_bps,
         )
+
+    @staticmethod
+    def _blockable_sources(pps_by_src: Dict[str, float]) -> List[str]:
+        """
+        Which of a distributed detection's contributing sources are worth
+        individually quarantining -- see settings.DIST_PER_SOURCE_MIN_PPS's
+        own comment. Deliberately NOT applied to is_distributed/entropy
+        (pps_by_src, computed before this is ever called, already saw
+        every contributing source's real pps unfiltered) -- this only
+        decides which of them end up in DetectionResult.sources, i.e.
+        which ones orchestration/controller.py's PER_SOURCE_MITIGATION_
+        DOMAINS branch actually blocks. A source below the floor stays
+        out of `sources` even though it's still counted toward the
+        aggregate pps/entropy that triggered this detection in the first
+        place.
+        """
+        return [ip for ip, pps in pps_by_src.items() if pps >= settings.DIST_PER_SOURCE_MIN_PPS]
 
     @staticmethod
     def _normalize_protocol(protocol: str) -> str:
@@ -389,12 +440,6 @@ class DDoSDetectionEngine:
         score = total_pps / pps_threshold
         total_bps = sum(e.bps for e in candidate_events)
 
-        multidomain = len(event.domains) > 1
-        confidence = min(
-            entropy * (self.MULTIDOMAIN_BOOST if multidomain else 1.0),
-            1.0
-        )
-
         # No single attacking IP to point at — representative is just used
         # for domain/device/protocol/port context.
         representative: TelemetryEvent = max(candidate_events, key=lambda e: e.pps)
@@ -404,11 +449,17 @@ class DDoSDetectionEngine:
         source_device_ids = {e.src_ip: e.device_id for e in candidate_events}
         # See DetectionResult.source_domains -- built from the same
         # candidate_events pps_by_src came from, not the coarser
-        # event.domains (see _build_result's matching comment).
+        # event.domains (see _build_result's matching comment -- same
+        # reasoning: that set also includes unrelated benign traffic from
+        # other domains sharing this dst_ip).
         source_domains = {e.src_ip: e.domain for e in candidate_events}
+        multidomain = len(set(source_domains.values())) > 1
+        confidence = min(
+            entropy * (self.MULTIDOMAIN_BOOST if multidomain else 1.0),
+            1.0
+        )
         distributed_attack_type = (
-            "MULTIDOMAIN_DISTRIBUTED_ATTACK" if len(set(source_domains.values())) > 1
-            else "DDOS_DISTRIBUTED"
+            "MULTIDOMAIN_DISTRIBUTED_ATTACK" if multidomain else "DDOS_DISTRIBUTED"
         )
 
         return DetectionResult(
@@ -421,7 +472,7 @@ class DDoSDetectionEngine:
             attack_type=distributed_attack_type,
             score=score,
             confidence=confidence,
-            sources=list(pps_by_src.keys()),
+            sources=self._blockable_sources(pps_by_src),
             source_device_ids=source_device_ids,
             source_domains=source_domains,
             pps=total_pps,
