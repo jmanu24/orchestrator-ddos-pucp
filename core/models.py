@@ -117,6 +117,24 @@ class DetectionResult:
     pps/bps     : the representative event's measured rate at detection
                   time — carried through purely for observability
                   (audit records)
+    activation_delay_s : how long detection/engine.py's own activation
+                  hysteresis (ENTERPRISE_ACTIVATION_*, PEERING_ACTIVATION_*,
+                  BROADBAND_ACTIVATION_*, MOBILE_SYN_ACTIVATION_*) held this
+                  detection back before it was first reported -- the gap
+                  between the cycle _classify() first silently produced a
+                  matching detection for this (domain, dst_ip, protocol) and
+                  the cycle _activated() finally let one through. Always
+                  0.0 for a detection exempt from that hysteresis (anything
+                  spanning more than one domain, or whose domain has none
+                  configured) -- those are reported on their very first
+                  classification. A duration in DDoSDetectionEngine's own
+                  clock (monotonic in production), not a wall-clock instant
+                  -- subtract it from `timestamp` (wall-clock) to recover
+                  this detection's true first-classified wall time, which is
+                  what lets analysis separate the activation-hysteresis
+                  exemption's own timing contribution from the information
+                  (multi-domain telemetry) effect when comparing isolated
+                  vs. multidomain detection.
     """
     domain: str
     device_id: str
@@ -133,6 +151,7 @@ class DetectionResult:
     in_port: int = 0
     pps: float = 0.0
     bps: float = 0.0
+    activation_delay_s: float = 0.0
     timestamp: float = field(
         default_factory=lambda: datetime.now().timestamp()
     )

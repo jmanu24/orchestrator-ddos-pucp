@@ -83,6 +83,24 @@ DIST_MIN_SOURCES = 5          # need at least this many distinct sources
 DIST_ENTROPY_THRESHOLD = 0.7  # normalized Shannon entropy (0-1) of src distribution
 DIST_PPS_THRESHOLD = 300      # aggregate pps across all sources toward one dst
 
+# Floor (pps) a single source must clear to be INCLUDED in a distributed
+# detection's own `sources` list (detection/engine.py's _build_result/
+# _classify_distributed) -- i.e. to actually get quarantined by the
+# per-source mitigation domains (mobile UEs, BNG subscribers; see
+# orchestration/controller.py's PER_SOURCE_MITIGATION_DOMAINS branch of
+# _build_actions). Does NOT affect is_distributed/entropy itself, which
+# still sees every contributing source's real pps -- only which of them
+# get individually mitigated. Without this, a benign source that happened
+# to send a trickle of the same protocol toward the same dst_ip that same
+# cycle (e.g. a subscriber's own baseline traffic, or a UE's unrelated
+# flow) joins `pps_by_src` with a near-zero rate and gets blocked right
+# alongside the real distributed attackers -- same mechanism that
+# benign-lab's own per-subscriber baseline (~1 TCP SYN/s, see
+# tools/benign-lab) would otherwise trip. Set below any real attacker's
+# per-source contribution in a distributed flood (DIST_PPS_THRESHOLD /
+# DIST_MIN_SOURCES on average), above routine per-source baseline noise.
+DIST_PER_SOURCE_MIN_PPS = 1.0
+
 # Minimum conntrack pps a mobile flow must carry to be considered the
 # "carrier" of a UE's KPM-flagged attack (DDoSDetectionEngine.
 # _mobile_kpm_signal): conntrack only identifies WHICH flow the UE is

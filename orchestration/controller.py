@@ -360,7 +360,14 @@ class OrchestrationController:
         share a correlation window and never combine. Matched on dst_ip
         alone, not the full 4-tuple -- a coordinated attack can use a
         different protocol per domain (enterprise SYN, mobile ICMP,
-        etc.), which a narrower match would miss entirely.
+        etc.), which a narrower match would miss entirely. Gated on
+        settings.DETECTION_CROSS_DOMAIN_CORRELATION -- in isolated mode
+        (the thesis's own I baseline) this relabeling never fires, since
+        _active_blocks/_active_mobile_blocks are process-wide state that
+        exists regardless of correlation mode and would otherwise leak a
+        MULTIDOMAIN label into I purely from two domains' blocks
+        overlapping in time, something I is specifically meant to never
+        produce.
         """
         actions: List[MitigationAction] = []
         seen_domains = set()
@@ -373,7 +380,22 @@ class OrchestrationController:
             seen_domains.add(d.domain)
 
             contributing_domains = set(d.source_domains.values()) if d.source_domains else {d.domain}
-            already_active_domains = self._active_domains_for(d.dst_ip) - contributing_domains
+            # Only consider another domain's already-active block when
+            # cross-domain correlation is actually enabled. _active_blocks/
+            # _active_mobile_blocks are process-wide state, shared
+            # regardless of DETECTION_CROSS_DOMAIN_CORRELATION -- without
+            # this guard, isolated mode (cross_domain=False, the thesis's
+            # own I baseline, where each domain's detection is supposed to
+            # never know about the others) could still relabel a detection
+            # MULTIDOMAIN_DISTRIBUTED_ATTACK purely because two domains
+            # happened to attack the same dst_ip at overlapping times --
+            # a label I should never be able to produce, even though the
+            # underlying mitigation action taken is identical either way
+            # (see _action_for).
+            already_active_domains = (
+                self._active_domains_for(d.dst_ip) - contributing_domains
+                if settings.DETECTION_CROSS_DOMAIN_CORRELATION else set()
+            )
             effective_attack_type = (
                 "MULTIDOMAIN_DISTRIBUTED_ATTACK" if already_active_domains else decision.attack_type
             )
