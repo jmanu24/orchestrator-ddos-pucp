@@ -99,6 +99,14 @@ DIST_PPS_THRESHOLD = 300      # aggregate pps across all sources toward one dst
 # tools/benign-lab) would otherwise trip. Set below any real attacker's
 # per-source contribution in a distributed flood (DIST_PPS_THRESHOLD /
 # DIST_MIN_SOURCES on average), above routine per-source baseline noise.
+# Mobile sources are exempt from this floor entirely (see
+# detection/engine.py's _blockable_sources) -- conntrack under-counts a
+# UE's real send rate over ZMQ badly enough that a genuinely attacking
+# UE's measured pps can land under this floor while still contributing
+# real volume to the detection (confirmed on a real run, 2026-10-18);
+# mobile already has its own KPM-based activation gate deciding whether
+# a UE is attacking at all, so this floor would only ever drop a true
+# positive from it, never filter noise.
 DIST_PER_SOURCE_MIN_PPS = 1.0
 
 # Minimum conntrack pps a mobile flow must carry to be considered the
