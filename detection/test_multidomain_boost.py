@@ -10,7 +10,9 @@ Also covers DIST_PER_SOURCE_MIN_PPS: a distributed detection's own
 `sources` list (what orchestration/controller.py actually quarantines per
 source) must exclude a contributing source whose individual pps never
 cleared that floor, even though it's still counted toward the aggregate
-pps/entropy that triggered the detection."""
+pps/entropy that triggered the detection -- except mobile sources, which
+are always kept regardless (conntrack under-counts a UE's real rate over
+ZMQ, see _blockable_sources's own docstring)."""
 
 import unittest
 from unittest import mock
@@ -165,6 +167,22 @@ class PerSourceMinPpsTests(unittest.TestCase):
         detection = self.engine._classify(event)
 
         self.assertEqual(set(detection.sources), {s.src_ip for s in sources})
+
+    def test_mobile_source_is_never_dropped_by_the_floor(self):
+        # Confirmed on a real run (2026-10-18): conntrack under-counts a
+        # UE's real send rate over ZMQ badly enough that a genuinely
+        # attacking UE's measured pps can land under this floor even
+        # while it's a real contributor -- mobile has its own KPM-based
+        # activation gate deciding whether it's attacking at all, so the
+        # pps floor must never be the thing that drops it from `sources`.
+        enterprise_sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 50.0) for i in range(1, 6)]
+        under_reported_ue = _event("mobile", "10.45.1.6", "UDP", 0.3)  # under the 1.0pps floor
+        event = _correlated(enterprise_sources + [under_reported_ue], domains=["enterprise", "mobile"])
+
+        detection = self.engine._classify(event)
+
+        self.assertIsNotNone(detection)
+        self.assertIn("10.45.1.6", detection.sources)
 
 
 if __name__ == "__main__":

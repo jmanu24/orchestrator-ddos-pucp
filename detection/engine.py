@@ -330,7 +330,7 @@ class DDoSDetectionEngine:
                 attack_type=distributed_attack_type,
                 score=score,
                 confidence=confidence,
-                sources=self._blockable_sources(pps_by_src),
+                sources=self._blockable_sources(pps_by_src, source_domains),
                 source_device_ids=source_device_ids,
                 source_domains=source_domains,
                 pps=total_pps,
@@ -371,7 +371,7 @@ class DDoSDetectionEngine:
         )
 
     @staticmethod
-    def _blockable_sources(pps_by_src: Dict[str, float]) -> List[str]:
+    def _blockable_sources(pps_by_src: Dict[str, float], source_domains: Dict[str, str]) -> List[str]:
         """
         Which of a distributed detection's contributing sources are worth
         individually quarantining -- see settings.DIST_PER_SOURCE_MIN_PPS's
@@ -384,8 +384,30 @@ class DDoSDetectionEngine:
         out of `sources` even though it's still counted toward the
         aggregate pps/entropy that triggered this detection in the first
         place.
+
+        Mobile sources are exempt from the floor, always kept regardless
+        of their own pps_by_src value -- confirmed on a real run
+        (2026-10-18, 5-source sub-threshold multidomain test): conntrack
+        under-counts a UE's real send rate over ZMQ badly enough (see
+        telemetry/mobile_adapter.py's own docstring and the KPM-vs-pps
+        comments in _mobile_kpm_signal) that a genuinely attacking UE's
+        measured pps can land under DIST_PER_SOURCE_MIN_PPS even while
+        contributing real volume -- the detection still fired correctly
+        (MULTIDOMAIN_DISTRIBUTED_ATTACK, via source_domains), but the UE
+        silently never got a THROTTLE action because it fell out of
+        `sources`. The floor's own purpose (exclude a trivial/benign
+        contributor from individual mitigation) only holds for domains
+        whose pps_by_src is a trustworthy measurement of real traffic
+        (enterprise/broadband/bgp); mobile already has its own KPM-based
+        activation gate (_mobile_kpm_signal/MOBILE_KPM_ACTIVATION_CYCLES)
+        deciding whether a UE is genuinely attacking in the first place,
+        so this floor would only ever subtract true positives from it,
+        never filter noise.
         """
-        return [ip for ip, pps in pps_by_src.items() if pps >= settings.DIST_PER_SOURCE_MIN_PPS]
+        return [
+            ip for ip, pps in pps_by_src.items()
+            if pps >= settings.DIST_PER_SOURCE_MIN_PPS or source_domains.get(ip) == "mobile"
+        ]
 
     @staticmethod
     def _normalize_protocol(protocol: str) -> str:
@@ -472,7 +494,7 @@ class DDoSDetectionEngine:
             attack_type=distributed_attack_type,
             score=score,
             confidence=confidence,
-            sources=self._blockable_sources(pps_by_src),
+            sources=self._blockable_sources(pps_by_src, source_domains),
             source_device_ids=source_device_ids,
             source_domains=source_domains,
             pps=total_pps,
