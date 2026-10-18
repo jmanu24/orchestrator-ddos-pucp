@@ -2,11 +2,9 @@
 /telemetry payload (real destination/protocol/port), not from RADIUS
 accounting or the traffic generator's state. Needs eventlet (venv)."""
 
-import subprocess
 import unittest
 from unittest import mock
 
-from telemetry import broadband_adapter
 from telemetry.broadband_adapter import BroadbandAdapter
 
 IP = "10.20.0.201"
@@ -20,11 +18,10 @@ def row(proto="UDP", dst="10.55.0.100", port=53, pps=900.0, bps=54000.0, at=1.0,
 
 class FlowTelemetryTests(unittest.TestCase):
     def setUp(self):
-        p = mock.patch.object(broadband_adapter, "_ssh",
-                              lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
-        p.start()
-        self.addCleanup(p.stop)
-        self.adapter = BroadbandAdapter()
+        # Pure telemetry test -- a stub mitigator keeps this independent of
+        # mitigation/broadband_mitigator.py's own SSH calls (its
+        # constructor clears stale FreeRADIUS reject markers over SSH).
+        self.adapter = BroadbandAdapter(mitigator=mock.Mock())
         self.payload = None
         self.adapter._read_flow_api = lambda: self.payload
 

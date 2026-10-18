@@ -41,7 +41,12 @@ class OfferedLoadTests(unittest.TestCase):
         p = mock.patch.object(broadband_adapter, "_ssh", fake_ssh)
         p.start()
         self.addCleanup(p.stop)
-        self.adapter = BroadbandAdapter()
+        # offered_pps()/_read_offered_counters() stay on the adapter (they're
+        # a telemetry concern -- measuring a blocked subscriber's offered
+        # load) and still go through this module's own _ssh_bng(), hence the
+        # patch above. The mitigator is unrelated to this test; stub it out
+        # so its own constructor doesn't make a second, unpatched SSH call.
+        self.adapter = BroadbandAdapter(mitigator=mock.Mock())
         self.adapter._mac_by_ip[IP] = MAC
         self.now = [100.0]
         self.adapter._clock = lambda: self.now[0]
