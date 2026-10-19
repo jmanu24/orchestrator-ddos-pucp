@@ -1,11 +1,12 @@
 from dataclasses import asdict
 from core.experiment_audit import emit as audit_emit
+import ipaddress
 import json
 import logging
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import config.settings as settings
 from core.log_format import log_line
@@ -20,6 +21,39 @@ _THRESHOLD_BY_PROTOCOL = {
     "UDP": settings.UDP_THRESHOLD,
     "ICMP": settings.ICMP_THRESHOLD,
 }
+
+# Backbone address ranges where pe's own OpenFlow view of a domain's
+# traffic is always the address AFTER NAT/masquerade has already
+# happened upstream (the BNG for broadband, the UPF/backbone for mobile)
+# -- never the real per-subscriber/per-UE address telemetry reports and
+# _validated_flows is keyed by. Same two ranges telemetry/
+# openflow_adapter.py's own _DISTRIBUTED_NON_ENTERPRISE_SUBNETS comment
+# names from pe's side ("The PE sees mobile and fixed traffic after NAT
+# (10.91.0.2 / 10.92.0.2)..."). Peering deliberately has NO entry here --
+# its backbone leg (10.93.0.0/30) carries the real external peer address
+# unchanged, so is_validated_flow()'s ordinary per-exact-IP lookup
+# already works for it; enterprise never crosses a NAT boundary before
+# pe either. See is_validated_flow()'s own docstring for why this needs
+# a domain-aggregate fallback instead of a literal address translation.
+_NAT_BACKBONE_DOMAINS = (
+    (ipaddress.ip_network("10.91.0.0/30"), "mobile"),
+    (ipaddress.ip_network("10.92.0.0/30"), "broadband"),
+)
+
+
+def _nat_backbone_domain(ip: str) -> Optional[str]:
+    """Which domain's traffic pe sees as this post-NAT backbone address,
+    or None if ip isn't one of them (enterprise/peering sources, and
+    every real pre-NAT subscriber/UE address, never fall in these
+    narrow /30s)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for net, domain in _NAT_BACKBONE_DOMAINS:
+        if addr in net:
+            return domain
+    return None
 
 
 class OrchestrationController:
@@ -165,6 +199,22 @@ class OrchestrationController:
         # punishing every OTHER source that happens to share a popular
         # destination with an actual attacker.
         self._validated_flows: Set[Tuple[str, str]] = set()
+
+        # (domain, dst_ip) -> True once at least one real flow for a
+        # NAT-translated domain (mobile/broadband) has gone through a
+        # full detection cycle toward this destination. is_validated_flow()
+        # needs this because _validated_flows alone can never match a
+        # NAT backbone address (see _nat_backbone_domain) -- without this
+        # guard, the very first packet-in on a brand-new such flow (zero
+        # detection cycles run yet) would otherwise look exactly like
+        # "every real source has been checked and found clean", which is
+        # exactly the blind-trust PROVISIONAL_TIMEOUT exists to prevent
+        # (forwarding/learning_switch.py's own comment on it). Populated
+        # in validate(), never discarded -- once a domain+dst pair has
+        # been evaluated at all, whether it stays "validated" going
+        # forward is decided live from _active_mobile_blocks instead (see
+        # is_validated_flow()).
+        self._nat_domain_dst_seen: Set[Tuple[str, str]] = set()
 
         # (key, dpid) -> last sample of the matching drop rule's counters.
         # Once blocked, an attacker's packets are dropped in the fast path
@@ -895,8 +945,56 @@ class OrchestrationController:
         (e.g. this topology's central server) must not drag every OTHER
         source's already-clean traffic back into the unvalidated state
         just because one specific source is under attack.
+
+        src_ip/dst_ip here are whatever pe's own OpenFlow packet-in/
+        flow-stats shows — for mobile/broadband that is ALWAYS the
+        post-NAT backbone address on WHICHEVER end is this domain's own
+        subscriber/UE (_nat_backbone_domain), never the real per-UE/per-
+        subscriber address telemetry reports and _validated_flows is
+        keyed by. Checked on a real run, 2026-10-19: fixing only the
+        subscriber-to-victim direction (src_ip NAT'd) left the much
+        higher-volume victim-to-subscriber direction (dst_ip NAT'd --
+        e.g. a download's bulk data) still exact-matching against
+        _validated_flows and failing every time, so that direction's
+        rule never left LearningSwitch's 2s PROVISIONAL_TIMEOUT either,
+        still causing periodic connection resets on sustained downloads
+        even with only the first fix applied.
+
+        For either direction, exact-IP matching is impossible in
+        principle -- pe cannot see past the NAT boundary to tell
+        individual subscribers/UEs apart -- so this falls back to an
+        aggregate, domain-scoped signal: whichever of src_ip/dst_ip is a
+        NAT backbone address identifies the domain, and the OTHER one
+        (the real victim/counterpart address, same in both directions of
+        one connection) is checked as the dst_ip validate() actually
+        tracked. That backbone address is "validated" once its domain
+        has been through at least one detection cycle for that other
+        address (_nat_domain_dst_seen, so a brand-new flow still isn't
+        blindly trusted) AND no real source of that domain is currently
+        under an active block against it (_active_mobile_blocks, live
+        state — not just this cycle's, unlike the per-cycle
+        attacking_sources_by_dst validate() uses). A single still-
+        blocked subscriber/UE is enough to keep the WHOLE aggregate flow
+        (both directions) provisional, by design: this must never make
+        the domain's real detection invisible to pe just because most
+        other sources behind the same NAT happen to be clean right now.
+        Enterprise and peering never hit this fallback at all --
+        _nat_backbone_domain returns None for their own addresses on
+        either end.
         """
-        return (src_ip, dst_ip) in self._validated_flows
+        if (src_ip, dst_ip) in self._validated_flows:
+            return True
+        domain = _nat_backbone_domain(src_ip)
+        other = dst_ip
+        if domain is None:
+            domain = _nat_backbone_domain(dst_ip)
+            other = src_ip
+        if domain is None or (domain, other) not in self._nat_domain_dst_seen:
+            return False
+        return not any(
+            action.domain == domain and action.dst_ip == other
+            for action in self._active_mobile_blocks.values()
+        )
 
     def validate(self, correlated: List[CorrelatedEvent], detections: List[DetectionResult]) -> None:
         """
@@ -908,6 +1006,11 @@ class OrchestrationController:
         unvalidated; it gets blocked instead, and stays unvalidated until
         it's reassessed clean in some future cycle. Every OTHER source
         sharing that same destination is unaffected either way.
+
+        Also records, for NAT-translated domains (mobile/broadband) only,
+        that this (domain, dst_ip) pair has now been through at least one
+        detection cycle at all -- see is_validated_flow()'s own docstring
+        for why that's needed on top of _validated_flows itself.
         """
         attacking_sources_by_dst: Dict[str, Set[str]] = defaultdict(set)
         for d in detections:
@@ -920,6 +1023,8 @@ class OrchestrationController:
             for event in c.events:
                 if event.src_ip not in attackers:
                     self._validated_flows.add((event.src_ip, c.dst_ip))
+                if event.domain in ("mobile", "broadband"):
+                    self._nat_domain_dst_seen.add((event.domain, c.dst_ip))
 
     # ------------------------------------------------------------------
     # Continuous sweep — catches forwarding rules clear_forwarding_rules()
