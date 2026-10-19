@@ -946,38 +946,53 @@ class OrchestrationController:
         source's already-clean traffic back into the unvalidated state
         just because one specific source is under attack.
 
-        src_ip here is whatever pe's own OpenFlow packet-in/flow-stats
-        shows — for mobile/broadband that is ALWAYS the post-NAT backbone
-        address (_nat_backbone_domain), never the real per-UE/per-
+        src_ip/dst_ip here are whatever pe's own OpenFlow packet-in/
+        flow-stats shows — for mobile/broadband that is ALWAYS the
+        post-NAT backbone address on WHICHEVER end is this domain's own
+        subscriber/UE (_nat_backbone_domain), never the real per-UE/per-
         subscriber address telemetry reports and _validated_flows is
-        keyed by (confirmed on a real run, 2026-10-19: this exact-match
-        miss kept every broadband/mobile flow toward the victim stuck on
-        LearningSwitch's 2s PROVISIONAL_TIMEOUT forever instead of the
-        30s VALIDATED_FLOW_HARD_TIMEOUT, causing periodic connection
-        resets on sustained high-throughput transfers). For those, exact-
-        IP matching is impossible in principle -- pe cannot see past the
-        NAT boundary to tell individual subscribers/UEs apart -- so this
-        falls back to an aggregate, domain-scoped signal: the backbone
-        address is "validated" once its domain has been through at least
-        one detection cycle for this dst_ip (_nat_domain_dst_seen, so a
-        brand-new flow still isn't blindly trusted) AND no real source of
-        that domain is currently under an active block against it
-        (_active_mobile_blocks, live state — not just this cycle's,
-        unlike the per-cycle attacking_sources_by_dst validate() uses).
-        A single still-blocked subscriber/UE is enough to keep the WHOLE
-        aggregate backbone flow provisional, by design: this must never
-        make the domain's real detection invisible to pe just because
-        most other sources behind the same NAT happen to be clean right
-        now. Enterprise and peering never hit this fallback at all --
-        _nat_backbone_domain returns None for their own source addresses.
+        keyed by. Checked on a real run, 2026-10-19: fixing only the
+        subscriber-to-victim direction (src_ip NAT'd) left the much
+        higher-volume victim-to-subscriber direction (dst_ip NAT'd --
+        e.g. a download's bulk data) still exact-matching against
+        _validated_flows and failing every time, so that direction's
+        rule never left LearningSwitch's 2s PROVISIONAL_TIMEOUT either,
+        still causing periodic connection resets on sustained downloads
+        even with only the first fix applied.
+
+        For either direction, exact-IP matching is impossible in
+        principle -- pe cannot see past the NAT boundary to tell
+        individual subscribers/UEs apart -- so this falls back to an
+        aggregate, domain-scoped signal: whichever of src_ip/dst_ip is a
+        NAT backbone address identifies the domain, and the OTHER one
+        (the real victim/counterpart address, same in both directions of
+        one connection) is checked as the dst_ip validate() actually
+        tracked. That backbone address is "validated" once its domain
+        has been through at least one detection cycle for that other
+        address (_nat_domain_dst_seen, so a brand-new flow still isn't
+        blindly trusted) AND no real source of that domain is currently
+        under an active block against it (_active_mobile_blocks, live
+        state — not just this cycle's, unlike the per-cycle
+        attacking_sources_by_dst validate() uses). A single still-
+        blocked subscriber/UE is enough to keep the WHOLE aggregate flow
+        (both directions) provisional, by design: this must never make
+        the domain's real detection invisible to pe just because most
+        other sources behind the same NAT happen to be clean right now.
+        Enterprise and peering never hit this fallback at all --
+        _nat_backbone_domain returns None for their own addresses on
+        either end.
         """
         if (src_ip, dst_ip) in self._validated_flows:
             return True
         domain = _nat_backbone_domain(src_ip)
-        if domain is None or (domain, dst_ip) not in self._nat_domain_dst_seen:
+        other = dst_ip
+        if domain is None:
+            domain = _nat_backbone_domain(dst_ip)
+            other = src_ip
+        if domain is None or (domain, other) not in self._nat_domain_dst_seen:
             return False
         return not any(
-            action.domain == domain and action.dst_ip == dst_ip
+            action.domain == domain and action.dst_ip == other
             for action in self._active_mobile_blocks.values()
         )
 

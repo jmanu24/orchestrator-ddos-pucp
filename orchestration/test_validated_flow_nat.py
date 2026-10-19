@@ -12,6 +12,11 @@ VALIDATED_FLOW_HARD_TIMEOUT=30s -- confirmed on a real run (2026-10-19)
 causing periodic ConnectionResetError on sustained high-throughput
 transfers.
 
+Checked in BOTH directions -- the subscriber/UE-to-victim direction
+(src_ip NAT'd) and the victim-to-subscriber/UE direction (dst_ip NAT'd,
+the higher-volume one for a download). A first version of this fix only
+covered the former and still left downloads resetting every 2s.
+
 Enterprise and peering never cross a NAT boundary before pe (confirmed:
 peering's backbone leg keeps the real external peer address unchanged),
 so they keep the exact pre-fix behavior throughout."""
@@ -62,6 +67,35 @@ class NatBackboneValidationTests(unittest.TestCase):
         # ...but pe never sees that address -- it sees the NAT backbone
         # one, which must now ALSO validate.
         self.assertTrue(controller.is_validated_flow(BROADBAND_NAT_ADDR, DST))
+
+    def test_the_reverse_direction_validates_too(self):
+        """The victim-to-subscriber direction (e.g. a download's bulk
+        data) is queried as (src_ip=victim, dst_ip=NAT backbone address)
+        -- the NAT'd address on the OTHER side of the tuple from the
+        forward-direction case above. A fix that only handled src_ip
+        being NAT'd would still leave this direction's rule stuck on
+        PROVISIONAL_TIMEOUT."""
+        controller = _controller()
+        correlated = [CorrelatedEvent(dst_ip=DST, total_pps=1.0, total_bps=100.0,
+                                      domains=["broadband"], events=[_broadband_event()])]
+        controller.validate(correlated, detections=[])
+
+        self.assertTrue(controller.is_validated_flow(DST, BROADBAND_NAT_ADDR))
+
+    def test_reverse_direction_also_respects_an_active_block(self):
+        controller = _controller()
+        correlated = [CorrelatedEvent(dst_ip=DST, total_pps=1.0, total_bps=100.0,
+                                      domains=["mobile"], events=[_mobile_event()])]
+        controller.validate(correlated, detections=[])
+        self.assertTrue(controller.is_validated_flow(DST, MOBILE_NAT_ADDR))
+
+        key = (REAL_UE, DST, 9999, "UDP")
+        controller._active_mobile_blocks[key] = MitigationAction(
+            domain="mobile", device_id="402", src_ip=REAL_UE, dst_ip=DST,
+            dst_port=9999, protocol="UDP", action="rate_limit", duration=60,
+            attack_type="UDP_FLOOD",
+        )
+        self.assertFalse(controller.is_validated_flow(DST, MOBILE_NAT_ADDR))
 
     def test_an_active_block_on_any_real_source_keeps_the_aggregate_unvalidated(self):
         """Even after the domain has been evaluated once (so the "seen"
