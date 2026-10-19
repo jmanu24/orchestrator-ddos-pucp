@@ -171,6 +171,27 @@ class DDoSDetectionEngine:
         ("ICMP", "ICMP_FLOOD", "ICMP_THRESHOLD"),
     )
 
+    @staticmethod
+    def _protocol_rate(proto_events: List[TelemetryEvent], protocol: str) -> Dict[str, object]:
+        """Pure arithmetic, no side effects: the SAME rate figures
+        _classify() compares against its threshold for this protocol --
+        total_pps (every domain), non_mobile_pps (mobile excluded, per
+        _classify()'s own mobile-is-KPM-driven rationale above it), and
+        trigger_pps, the one actually evaluated against the threshold
+        (total_pps for TCP_SYN, non_mobile_pps otherwise). Extracted so
+        observed_benign_rates() below can report the identical figures
+        for LAB_AUDIT without calling _classify()/_mobile_kpm_signal()
+        a second time -- the KPM call mutates _mobile_kpm_abuse_streak,
+        so calling it twice per cycle would corrupt that hysteresis
+        state and change detection. This helper has no such state."""
+        total_pps = sum(e.pps for e in proto_events)
+        non_mobile_pps = sum(e.pps for e in proto_events if e.domain != "mobile")
+        trigger_pps = total_pps if protocol == "TCP_SYN" else non_mobile_pps
+        by_domain: Dict[str, float] = {}
+        for e in proto_events:
+            by_domain[e.domain] = by_domain.get(e.domain, 0.0) + e.pps
+        return dict(total_pps=total_pps, non_mobile_pps=non_mobile_pps, trigger_pps=trigger_pps, by_domain=by_domain)
+
     def _classify(self, event: CorrelatedEvent) -> Optional[DetectionResult]:
         """
         Classify a single CorrelatedEvent.
@@ -189,7 +210,8 @@ class DDoSDetectionEngine:
             proto_events = [e for e in event.events if e.protocol == protocol]
             if not proto_events:
                 continue
-            total_pps = sum(e.pps for e in proto_events)
+            rate = self._protocol_rate(proto_events, protocol)
+            total_pps = rate["total_pps"]
 
             # Mobile domain is KPM-driven: the attack signal is the RAN's
             # own UL E2SM-KPM (PRB saturation AND high UL throughput), not
@@ -199,7 +221,6 @@ class DDoSDetectionEngine:
             # so a below-pps-threshold mobile flood (conntrack under-counts
             # over ZMQ) still fires on its KPM alone.
             kpm_attack, kpm_score = self._mobile_kpm_signal(proto_events)
-            non_mobile_pps = sum(e.pps for e in proto_events if e.domain != "mobile")
 
             # Bare SYNs are the exception: mobile TCP_SYN events carry the
             # core-side connection-attempt rate (ue_telemetry_api's NEW
@@ -208,7 +229,7 @@ class DDoSDetectionEngine:
             # saturate the radio. Measured on the lab: ~900 SYN/s from a UE
             # gave UL 2-3.7 Mbps but PRB 40-43, under MOBILE_KPM_PRB_UL_
             # THRESHOLD (45), so the KPM criterion alone never flags it.
-            trigger_pps = total_pps if protocol == "TCP_SYN" else non_mobile_pps
+            trigger_pps = rate["trigger_pps"]
 
             if trigger_pps <= threshold and not kpm_attack:
                 continue
@@ -522,3 +543,32 @@ class DDoSDetectionEngine:
         max_entropy = math.log2(len(probs))
 
         return entropy / max_entropy if max_entropy > 0 else 0.0
+
+
+def observed_benign_rates(correlated: List[CorrelatedEvent]) -> List[Dict[str, object]]:
+    """Observation only, for LAB_AUDIT kind=cycle (core/experiment_audit.py)
+    -- calibrating detection thresholds off DETECTED rates (which already
+    crossed a threshold by definition) would bias the result low. This
+    reports the rate EVERY correlation group's traffic has, per protocol
+    and per domain, exactly as DDoSDetectionEngine._classify() evaluates
+    it (including the mobile exclusion for UDP/ICMP), whether or not any
+    threshold was crossed.
+
+    Pure function of `correlated` -- the SAME CorrelatedEvent list
+    analyze() receives this cycle, read a second time with no shared
+    mutable state. It never calls _classify(), _mobile_kpm_signal() or
+    _activated(): no detection, decision or mitigation is affected by
+    calling (or not calling) this. See DDoSDetectionEngine._protocol_rate
+    for why -- that KPM call's own side effect is exactly what this
+    avoids by re-deriving only the pure rate arithmetic.
+    """
+    rows = []
+    for event in correlated:
+        protocols = {}
+        for protocol, _attack_type, _threshold_name in DDoSDetectionEngine._PROTOCOL_CHECKS:
+            proto_events = [e for e in event.events if e.protocol == protocol]
+            if proto_events:
+                protocols[protocol] = DDoSDetectionEngine._protocol_rate(proto_events, protocol)
+        if protocols:
+            rows.append(dict(dst_ip=event.dst_ip, domains=sorted(event.domains), protocols=protocols))
+    return rows
