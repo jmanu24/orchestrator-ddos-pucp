@@ -156,7 +156,8 @@ class OpenFlowAdapter(DomainAdapter):
                 # port" to the mitigator.
                 tcp_port = meta["dst_port"] if meta and meta["protocol"] in ("TCP", "TCP_SYN") else 0
                 _syn_origin_logger.info(
-                    "SYN_ORIGIN_DEBUG origin=flow_stats src=%s dst=%s pps=%s", src_ip, dst_ip, flow["packet_rate"])
+                    "SYN_ORIGIN_DEBUG origin=flow_stats dpid=%s src=%s dst=%s pps=%s packets=%s bytes=%s",
+                    dpid, src_ip, dst_ip, flow["packet_rate"], flow.get("packets"), flow.get("bytes"))
                 events.append(TelemetryEvent(
                     domain=self.domain_name,
                     device_id=str(dpid),
