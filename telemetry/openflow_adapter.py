@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -9,6 +10,14 @@ from core.models import TelemetryEvent, MitigationAction
 from telemetry.base import DomainAdapter
 from collectors.flow_collector import FlowCollector
 from collectors.ddos_collector import DDoSCollector
+
+# TEMPORARY diagnostic for the enterprise ~2x SYN overcount investigation
+# (2026-10-20). Logs which of the two TelemetryEvent-producing paths each
+# TCP_SYN event came from, so the two candidate mechanisms (the SYN twin
+# flow-stats rule vs. the DDoSCollector packet-in path) can be told apart
+# in a live LAB_AUDIT-adjacent log line. Not a detection/decision change --
+# removed once the investigation concludes either way.
+_syn_origin_logger = logging.getLogger("telemetry.openflow_adapter.syn_origin_debug")
 
 
 _PROTO_NAMES = {1: "ICMP", 6: "TCP", 17: "UDP"}
@@ -146,6 +155,8 @@ class OpenFlowAdapter(DomainAdapter):
                 # sighting (the twin matches no port); 0 means "any TCP
                 # port" to the mitigator.
                 tcp_port = meta["dst_port"] if meta and meta["protocol"] in ("TCP", "TCP_SYN") else 0
+                _syn_origin_logger.info(
+                    "SYN_ORIGIN_DEBUG origin=flow_stats src=%s dst=%s pps=%s", src_ip, dst_ip, flow["packet_rate"])
                 events.append(TelemetryEvent(
                     domain=self.domain_name,
                     device_id=str(dpid),
@@ -239,6 +250,10 @@ class OpenFlowAdapter(DomainAdapter):
             meta = self._fresh_meta(src_ip, result["dst_ip"])
             dpid = meta["dpid"] if meta else fallback_dpid
             in_port = meta["in_port"] if meta else fallback_in_port
+
+            if result["protocol"] == "TCP_SYN":
+                _syn_origin_logger.info(
+                    "SYN_ORIGIN_DEBUG origin=packet_in src=%s dst=%s pps=%s", src_ip, result["dst_ip"], pps)
 
             events.append(TelemetryEvent(
                 domain=self.domain_name,
