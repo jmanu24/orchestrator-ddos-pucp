@@ -316,6 +316,30 @@ DETECTION_CROSS_DOMAIN_CORRELATION = os.environ.get(
     "DETECTION_CROSS_DOMAIN_CORRELATION", "true"
 ).lower() in ("1", "true", "yes")
 
+# D4-B (thesis attack-plan regeneration, 2026-10-20): PREPARED, NOT
+# APPLIED -- default is "false", the exact prior behavior, unchanged.
+# detection/engine.py::_protocol_rate() excludes mobile from UDP/ICMP's
+# trigger_pps because mobile's real attack signal there is KPM-driven,
+# not pps-driven (see that function's own docstring and _classify()'s
+# comment on _mobile_kpm_signal()). That exclusion means a multidomain
+# UDP/ICMP attack composition that wants to include mobile as a
+# contributing source under the LOCAL (shared) threshold has no vector
+# to do so except TCP_SYN -- documented as a limitation in
+# traffic-generator-pucp/docs/ATTACK_PLAN_REGENERATION.md.
+#
+# Setting this to true makes trigger_pps = total_pps (mobile included)
+# for UDP/ICMP too, the same formula TCP_SYN already uses -- mobile's
+# conntrack-reported pps would then count toward the shared threshold
+# directly, on top of (not instead of) its existing KPM-based signal.
+# This does NOT touch _mobile_kpm_signal() or any mobile-specific
+# detection path -- only widens what ALREADY counts toward the shared
+# UDP/ICMP pps threshold. Left false pending the thesis author's own
+# decision (see detection/test_mobile_udp_icmp_aggregate_option.py for
+# both behaviors, verified).
+MOBILE_INCLUDED_IN_UDP_ICMP_AGGREGATE = os.environ.get(
+    "MOBILE_INCLUDED_IN_UDP_ICMP_AGGREGATE", "false"
+).lower() in ("1", "true", "yes")
+
 # br's real address on VLAN-MGMT (deploy/vm-lab/topology.yaml) -- what
 # `flow` binds its exabgp-facing listener to, and what this controller
 # SSHes to. Deliberately br's MGMT address, NOT its PEERING one: this

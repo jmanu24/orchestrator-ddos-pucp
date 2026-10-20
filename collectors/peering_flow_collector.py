@@ -244,6 +244,28 @@ class PeeringFlowCollector:
         Short field names used below (sa/da/dp/pr/td/ipkt/ibyt/flg) match
         nfdump 1.7.x's csv output; verify against `nfdump -o csv -c 1`
         on the deployed version if this ever stops parsing.
+
+        Bug fixed 2026-10-20 (found during threshold calibration, real
+        lab): nfdump reports `td` (this flow's own observed duration) as
+        very close to 0 for a short-lived flow with few packets -- a lone
+        SYN, say. The previous floor (max(td, 0.001)) turned that into
+        `pps = packets/0.001`, i.e. a single packet read as ~1000 pps.
+        telemetry/bgp_adapter.py passes this pps straight through to a
+        TelemetryEvent with no re-aggregation, and correlation/
+        correlator.py + detection/engine.py SUM every such event's pps
+        per cycle -- so a handful of ordinary short flows in one cycle
+        could sum to tens of thousands of apparent pps, confirmed live:
+        peering/bgp benign cycles briefly read up to ~29,000 "SYN pps"
+        during calibration, dwarfing every other domain's actual traffic
+        and the real attack ceiling measured from this same domain
+        (~15,000 pps, attack_runner, Paso 2). The floor is now
+        COLLECT_INTERVAL (the cycle's own real sampling granularity, 0.5s
+        in this deployment) instead of an arbitrary 1ms: a lone packet
+        now contributes at most packets/COLLECT_INTERVAL to a cycle's
+        aggregate rate, consistent with how often this pipeline actually
+        samples traffic, and a flow whose OWN duration genuinely exceeds
+        COLLECT_INTERVAL is completely unaffected (max() only engages for
+        the suspiciously-short-duration flows this bug actually hit).
         """
         records = []
         for row in csv.DictReader(io.StringIO(output)):
@@ -252,7 +274,7 @@ class PeeringFlowCollector:
                 dst_ip = row["da"]
                 if not src_ip or not dst_ip:
                     continue
-                duration_s = max(float(row["td"]), 0.001)
+                duration_s = max(float(row["td"]), settings.COLLECT_INTERVAL)
                 packets = int(row["ipkt"])
                 byte_count = int(row["ibyt"])
                 records.append({

@@ -12,7 +12,7 @@ class CalibrationModeTest(unittest.TestCase):
         method=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='_run_pipeline')
         module=ast.Module(body=[method],type_ignores=[])
         calls=[]
-        namespace=dict(time=time,baseline_active=lambda o:False,audit_emit=lambda *a,**k:None,audit_thresholds=lambda *a,**k:{},defaultdict=defaultdict,settings=SimpleNamespace(LAB_CALIBRATION_MODE=True,COLLECT_INTERVAL=0.5),metrics=SimpleNamespace(update_domain_traffic=lambda *a,**k:calls.append('telemetry'),set_active_blocks_by_domain=lambda *a:None))
+        namespace=dict(time=time,baseline_active=lambda o:False,audit_emit=lambda *a,**k:None,audit_thresholds=lambda *a,**k:{},observed_benign_rates=lambda correlated:[],defaultdict=defaultdict,settings=SimpleNamespace(LAB_CALIBRATION_MODE=True,COLLECT_INTERVAL=0.5),metrics=SimpleNamespace(update_domain_traffic=lambda *a,**k:calls.append('telemetry'),set_active_blocks_by_domain=lambda *a:None))
         exec(compile(module,'actual_controller_pipeline','exec'),namespace)
         event=SimpleNamespace(domain='enterprise',pps=100,bps=1000,src_ip='10.70.0.11',timestamp=time.time())
         def forbidden():

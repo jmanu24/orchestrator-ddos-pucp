@@ -39,7 +39,7 @@ from telemetry.bgp_adapter import BGPPeeringAdapter
 from correlation.correlator import MultidomainCorrelator
 
 # Stage 3 — DDoS Detection Engine
-from detection.engine import DDoSDetectionEngine
+from detection.engine import DDoSDetectionEngine, observed_benign_rates
 
 # Stages 4 + 5 — Decision Engine + Orchestration & Control
 from orchestration.controller import OrchestrationController
@@ -349,11 +349,17 @@ class FlowStatsIDS(app_manager.RyuApp):
         # Stage 2 — correlate across domains
         self.correlator.ingest(all_events)
         correlated = self.correlator.correlate()
+        # Observation only (core/experiment_audit.py docstring, detection/
+        # engine.py's observed_benign_rates() docstring): the benign rate
+        # distribution per protocol/destination/domain, exactly as the
+        # detector evaluates it, independent of whether any threshold was
+        # crossed. No detection/decision/mitigation reads this.
+        audit_rates = observed_benign_rates(correlated)
 
         # Keep telemetry and forwarding while isolated capacity probes run.
         if settings.LAB_CALIBRATION_MODE or baseline_active(self.orchestrator):
             self.orchestrator.validate(correlated, [])
-            audit_emit(self.logger,'cycle',pipeline_active=False,observed_sources=audit_sources,thresholds=audit_thresholds(settings),active_blocks=block_counts)
+            audit_emit(self.logger,'cycle',pipeline_active=False,observed_sources=audit_sources,thresholds=audit_thresholds(settings),active_blocks=block_counts,observed_rates=audit_rates)
             return
 
         # Release blocks whose flow volume has died down — driven by the
@@ -399,7 +405,7 @@ class FlowStatsIDS(app_manager.RyuApp):
         # gets validated.
         self.orchestrator.validate(correlated, detections)
 
-        audit_emit(self.logger,'cycle',pipeline_active=True,observed_sources=audit_sources,thresholds=audit_thresholds(settings),active_blocks=block_counts)
+        audit_emit(self.logger,'cycle',pipeline_active=True,observed_sources=audit_sources,thresholds=audit_thresholds(settings),active_blocks=block_counts,observed_rates=audit_rates)
         unblock_actions = openflow_unblock_actions + mobile_unblock_actions
         for action in unblock_actions:
             audit_emit(self.logger,'mitigation_release',action=asdict(action))
