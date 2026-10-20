@@ -66,11 +66,23 @@ desplegado) — todas pasan contra el archivo fusionado. Suite completa:
 180 pruebas, todas pasan.
 
 Desplegado a `/opt/isp-ddos-ryu/ue_telemetry_api.py` en core5g
-(10.10.0.5) con tu confirmación, servicio `ue-telemetry-api.service`
-reiniciado. Confirmado en vivo: re-ejecutando `composition1_mobile`
-(pipeline suspendido) y sondeando `/telemetry` directamente durante el
-ataque, ahora SÍ aparece una fila `protocol=="TCP_SYN"` con la tasa
-esperada — ver el reporte de validación para los números exactos.
+(10.10.0.5) con tu confirmación (respaldo guardado como
+`ue_telemetry_api.py.bak-20261020`), servicio `ue-telemetry-api.service`
+reiniciado y confirmado `active`.
+
+**Confirmado en vivo, extremo a extremo**: re-ejecutando
+`composition1_mobile` (pipeline suspendido, misma tasa objetivo
+364,9 pps):
+- Sondeo directo al bridge (`/telemetry`): 119 muestras con filas
+  `protocol=="TCP_SYN"` para `src_ip=10.45.1.2` (ue1), subiendo de
+  63 pps a >300 pps conforme la ventana deslizante de 2s se llena.
+- `observed_rates` del propio controlador (vía `LAB_AUDIT`): 117
+  muestras con `trigger_pps` para el grupo `domains=["mobile"]`,
+  valores consistentes (38,5 → 336,0 pps) — la señal ahora SÍ llega
+  completa, desde el kernel hasta la instrumentación del motor de
+  detección.
+
+Pipeline restaurado correctamente al finalizar.
 
 ## Supuestos
 
