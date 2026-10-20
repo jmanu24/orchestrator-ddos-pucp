@@ -1,21 +1,16 @@
 """FlowCollector's same-poll key-collision guard.
 
-Live-confirmed on the real controller (2026-10-20): the enterprise
-domain's SYN flow repeatedly showed a transient ~2x rate spike (e.g.
-~700pps when the real/planned rate was ~350-365pps), recurring every
-10-15s, always on a single dpid -- ruling out two switches independently
-reporting the same flow. The spike's cumulative `packets` counter was
-implausibly low for how long the flow had been running, consistent with
-a fresh OVS flow-table entry replacing a hard_timeout'd one
-(forwarding/learning_switch.py's VALIDATED_FLOW_HARD_TIMEOUT) that has
-the IDENTICAL OFPMatch -- so FlowCollector's key, which does not include
-priority or any entry-identity field, momentarily sees two distinct
-stat entries (the dying old one, high cumulative counters; the fresh
-new one, counters reset to ~0) for the exact same key within one
-OFPFlowStatsReply body. Diffing the second against the first's
-just-written counters (instead of the true previous cycle's baseline)
-produces a large spurious rate. See
-docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md.
+Investigated as a candidate cause of the enterprise ~2x transient SYN
+spike (docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md) -- live probing
+with dpid+priority logging confirmed this exact collision (two stat
+entries for the same key in one OFPFlowStatsReply body, e.g. a
+hard_timeout'd entry being replaced by a fresh one with the identical
+OFPMatch) never actually occurs for that spike; the real cause turned
+out to be a different, cross-layer double-count (on_packet_in +
+on_flow_stats both reporting the same traffic during a hard_timeout
+transition -- see the doc). This guard is kept anyway: it is correct,
+free, and defends against the same-key-collision failure mode in case
+it does occur under different load/topology.
 """
 import time
 import unittest
