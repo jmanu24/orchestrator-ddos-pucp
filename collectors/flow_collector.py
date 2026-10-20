@@ -13,7 +13,27 @@ class FlowCollector:
 
         flows = []
         now = time.time()
+        # Snapshot taken once, before any update from this body -- never
+        # read self.prev_flows mid-loop. A hard_timeout'd flow entry
+        # (forwarding/learning_switch.py's VALIDATED_FLOW_HARD_TIMEOUT)
+        # being replaced by a fresh one with the IDENTICAL OFPMatch can
+        # make OVS briefly report both the dying old entry (high
+        # cumulative counters) and the just-installed new one (freshly
+        # reset counters) in the SAME OFPFlowStatsReply body -- same key
+        # here (dpid, src, dst, proto, port) ignores priority/duration,
+        # so without this snapshot the second stat processed would diff
+        # against the first stat's just-written counters instead of the
+        # true previous cycle's baseline, producing a large spurious
+        # rate spike (observed live: ~2x the real rate, see
+        # docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md). Keyed collisions
+        # within this one body are collected in _seen_this_call and
+        # resolved after the main loop.
+        prev_snapshot = dict(self.prev_flows)
 
+        # First pass: group this body's stats by key. Almost always one
+        # stat per key; a second one for the same key is the collision
+        # described above.
+        by_key = {}
         for stat in body:
 
             # Skip mitigation drop rules — they keep counting matched
@@ -55,15 +75,33 @@ class FlowCollector:
                 dst_port = 0
             # -------------------------------
 
-            key = (
-                dpid,
-                src_ip,
-                dst_ip,
-                proto,
-                dst_port
-            )
+            key = (dpid, src_ip, dst_ip, proto, dst_port)
+            by_key.setdefault(key, []).append((stat, src_ip, dst_ip, proto, dst_port))
 
-            prev = self.prev_flows.get(key)
+        for key, entries in by_key.items():
+
+            if len(entries) > 1:
+                # Collision: this cycle's body reported more than one
+                # flow-table entry for the same (dpid, src, dst, proto,
+                # port) -- almost certainly a hard_timeout'd entry being
+                # replaced by a fresh one with the identical OFPMatch.
+                # Never diff one against the other (that's what produced
+                # the spurious ~2x spikes). Re-baseline on whichever has
+                # the larger cumulative packet_count -- the entry further
+                # along, most likely the one still live after this
+                # transition -- and skip emitting a rate for this key
+                # this cycle, exactly like the dt-too-small/negative-delta
+                # skips below.
+                stat, src_ip, dst_ip, proto, dst_port = max(entries, key=lambda e: e[0].packet_count)
+                self.prev_flows[key] = {
+                    "bytes": stat.byte_count,
+                    "packets": stat.packet_count,
+                    "time": now
+                }
+                continue
+
+            stat, src_ip, dst_ip, proto, dst_port = entries[0]
+            prev = prev_snapshot.get(key)
 
             if prev is None:
                 self.prev_flows[key] = {
