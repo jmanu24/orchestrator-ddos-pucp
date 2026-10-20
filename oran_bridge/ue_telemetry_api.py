@@ -43,6 +43,7 @@ returns pre-joined, ready-to-use rows so mobile_adapter.py's own job is
 just "GET a URL and build TelemetryEvents", nothing more.
 """
 
+from pathlib import Path
 import collections
 import ipaddress
 import json
@@ -79,13 +80,8 @@ LOG_POLL_INTERVAL_S = 0.5
 # SMF "UE SUPI[...] IPv4[...]" line -- guards against a stalled/failed
 # registration leaving a stale entry at the front of the FIFO forever.
 PENDING_NGAP_ID_TTL_S = 15.0
-# A session entry (amf_ue_ngap_id/imsi/ip) is dropped from the live map
-# if not refreshed within this long. The SMF only logs the "UE SUPI...IPv4..."
-# line once at PDU establishment and nothing refreshes updated_at, so this must
-# outlast how long a UE stays attached. Kept at 24h to match the RAN idle/
-# inactivity timers (srsRAN CU inactivity_timer=86400, AMF t3512=86400); a
-# shorter TTL purges live sessions mid-connection and starves KPM attribution.
-SESSION_TTL_S = 86400.0
+# Session ownership is event-driven: inactivity is not a PDU release.
+SESSION_CACHE_PATH = Path(os.environ.get('UE_SESSION_CACHE','/var/lib/isp-ddos-ryu/ue-sessions.json'))
 
 _AMF_NGAP_ID_RE = re.compile(
     r"RAN_UE_NGAP_ID\[(\d+)\]\s+AMF_UE_NGAP_ID\[(\d+)\]"
@@ -159,6 +155,9 @@ class _State:
         self.lock = threading.Lock()
         # ip -> {"imsi": str, "amf_ue_ngap_id": int, "updated_at": float}
         self.sessions = {}
+        self.container_generation = None
+        self.cache_signature = None
+        self.identity_cache_error = None
         # (src_ip,dst_ip,proto,dport) -> {"packets","bytes","pps","bps","updated_at"}
         self.flows = {}
         # imsi -> latest per-UE KPM sample from the oran-sc-ric bridge.
@@ -182,11 +181,33 @@ state = _State()
 # ---------------------------------------------------------------------
 
 def _container_log_path() -> str:
-    out = subprocess.run(
-        ["sudo", "docker", "inspect", "--format={{.LogPath}}", CONTAINER_NAME],
-        capture_output=True, text=True, timeout=10,
-    )
-    return out.stdout.strip()
+    out=subprocess.run(['sudo','docker','inspect','--format',
+        '{{json .LogPath}} {{.Id}}/{{.State.StartedAt}}',CONTAINER_NAME],capture_output=True,text=True,timeout=10)
+    if out.returncode:raise OSError('Open5GS log metadata unavailable')
+    encoded_path,generation=out.stdout.strip().split(' ',1)
+    path=json.loads(encoded_path)
+    with state.lock:
+        if state.container_generation != generation:
+            state.sessions={}
+            try:
+                cached=json.loads(SESSION_CACHE_PATH.read_text())
+                if cached.get('generation')==generation:state.sessions=cached.get('sessions',{})
+            except (OSError,ValueError):pass
+            state.container_generation=generation
+            state.cache_signature=None
+    return path
+
+
+def _persist_sessions():
+    with state.lock:
+        body=json.dumps(dict(generation=state.container_generation,sessions=state.sessions),sort_keys=True)
+        if body==state.cache_signature:return
+    try:
+        SESSION_CACHE_PATH.parent.mkdir(parents=True,exist_ok=True)
+        tmp=SESSION_CACHE_PATH.with_suffix('.tmp');tmp.write_text(body);tmp.chmod(0o600);tmp.replace(SESSION_CACHE_PATH)
+        with state.lock:state.cache_signature=body;state.identity_cache_error=None
+    except OSError as exc:
+        with state.lock:state.identity_cache_error=str(exc)
 
 
 def _log_tail_loop():
@@ -195,6 +216,7 @@ def _log_tail_loop():
     offset = 0
     pending = collections.deque()  # (amf_ue_ngap_id, nr_cell_id, seen_at)
     log_path = None
+    log_inode = None
 
     while True:
         try:
@@ -202,6 +224,13 @@ def _log_tail_loop():
                 log_path = _container_log_path()
                 offset = 0
 
+            file_stat=subprocess.run(['sudo','stat','-c','%i %s',log_path],capture_output=True,text=True,timeout=5)
+            if file_stat.returncode:raise OSError('Open5GS log file unavailable')
+            inode,size=map(int,file_stat.stdout.split())
+            if inode!=log_inode or size<offset:
+                offset=0
+                log_inode=inode
+                pending.clear()
             result = subprocess.run(
                 ["sudo", "tail", "-c", f"+{offset + 1}", log_path],
                 capture_output=True, text=True, timeout=10,
@@ -264,13 +293,10 @@ def _log_tail_loop():
                             "updated_at": now,
                         }
 
-            # Prune sessions nobody's refreshed in a long time.
-            with state.lock:
-                cutoff = now - SESSION_TTL_S
-                for ip in [ip for ip, v in state.sessions.items() if v["updated_at"] < cutoff]:
-                    del state.sessions[ip]
+            # Explicit SMF removal/replacement events above end ownership.
+            _persist_sessions()
 
-        except (subprocess.TimeoutExpired, OSError):
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             with state.lock:
                 state.log_connected = False
             log_path = None
@@ -468,10 +494,6 @@ def _conntrack_syn_event_loop():
         time.sleep(1.0)
 
 
-# ---------------------------------------------------------------------
-# 4. HTTP API
-# ---------------------------------------------------------------------
-
 def build_flow_rows(flows, syn_rates, sessions, kpm_by_imsi, now=None):
     """The /telemetry flow rows: the `conntrack -L` flows plus one TCP_SYN row
     per (UE, destination, port) with connection attempts in the window, every
@@ -501,6 +523,10 @@ def build_flow_rows(flows, syn_rates, sessions, kpm_by_imsi, now=None):
         })
     return rows
 
+
+# ---------------------------------------------------------------------
+# 4. HTTP API
+# ---------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -546,6 +572,8 @@ class Handler(BaseHTTPRequestHandler):
             "syn_events_connected": syn_events_connected,
             "kpm_connected": kpm_connected,
             "session_count": len(sessions),
+            "identity_source": "open5gs_session_events_with_generation_bound_cache",
+            "identity_cache_error": state.identity_cache_error,
         }).encode("utf-8")
 
         self.send_response(200)
