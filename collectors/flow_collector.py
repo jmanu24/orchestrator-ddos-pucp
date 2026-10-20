@@ -1,7 +1,13 @@
+import logging
 import time
 from collections import defaultdict
 
 import config.settings as settings
+
+# TEMPORARY -- verifying whether the same-poll key-collision guard below
+# ever actually fires during the still-observed enterprise spike
+# (2026-10-20, round 2). Removed once resolved.
+_debug_logger = logging.getLogger("collectors.flow_collector.collision_debug")
 
 
 class FlowCollector:
@@ -79,6 +85,10 @@ class FlowCollector:
             by_key.setdefault(key, []).append((stat, src_ip, dst_ip, proto, dst_port))
 
         for key, entries in by_key.items():
+            if key[1:3] == ("10.70.0.11", "10.55.0.100"):
+                _debug_logger.info(
+                    "COLLISION_DEBUG key=%s n_entries=%s counts=%s",
+                    key, len(entries), [e[0].packet_count for e in entries])
 
             if len(entries) > 1:
                 # Collision: this cycle's body reported more than one
