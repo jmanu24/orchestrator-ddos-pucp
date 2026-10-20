@@ -186,7 +186,11 @@ class DDoSDetectionEngine:
         state and change detection. This helper has no such state."""
         total_pps = sum(e.pps for e in proto_events)
         non_mobile_pps = sum(e.pps for e in proto_events if e.domain != "mobile")
-        trigger_pps = total_pps if protocol == "TCP_SYN" else non_mobile_pps
+        # D4-B (prepared, not applied -- settings.py's own docstring on
+        # this flag has the full rationale): default behavior (flag
+        # false) is unchanged from before this flag existed.
+        include_mobile = protocol == "TCP_SYN" or settings.MOBILE_INCLUDED_IN_UDP_ICMP_AGGREGATE
+        trigger_pps = total_pps if include_mobile else non_mobile_pps
         by_domain: Dict[str, float] = {}
         for e in proto_events:
             by_domain[e.domain] = by_domain.get(e.domain, 0.0) + e.pps
