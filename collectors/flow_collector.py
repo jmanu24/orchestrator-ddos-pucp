@@ -87,9 +87,8 @@ class FlowCollector:
         for key, entries in by_key.items():
             if key[1:3] == ("10.70.0.11", "10.55.0.100"):
                 _debug_logger.info(
-                    "COLLISION_DEBUG key=%s n_entries=%s counts=%s priorities=%s",
-                    key, len(entries), [e[0].packet_count for e in entries],
-                    [e[0].priority for e in entries])
+                    "COLLISION_DEBUG key=%s n_entries=%s counts=%s",
+                    key, len(entries), [e[0].packet_count for e in entries])
 
             if len(entries) > 1:
                 # Collision: this cycle's body reported more than one
