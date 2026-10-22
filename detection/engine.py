@@ -573,6 +573,19 @@ def observed_benign_rates(correlated: List[CorrelatedEvent]) -> List[Dict[str, o
             proto_events = [e for e in event.events if e.protocol == protocol]
             if proto_events:
                 protocols[protocol] = DDoSDetectionEngine._protocol_rate(proto_events, protocol)
-        if protocols:
-            rows.append(dict(dst_ip=event.dst_ip, domains=sorted(event.domains), protocols=protocols))
+        # Protocol-agnostic aggregate, every domain/protocol in the group --
+        # the EXACT same arithmetic _classify_distributed() uses for its
+        # own total_pps (the value DIST_PPS_THRESHOLD is actually compared
+        # against, in the fallback path _classify() takes when no single
+        # protocol's own aggregate crossed its threshold). Pure arithmetic,
+        # same as _protocol_rate() above -- calling this never touches
+        # _classify()/_classify_distributed()/any detection state.
+        dist_pps_all_protocols = sum(e.pps for e in event.events)
+        if protocols or event.events:
+            rows.append(dict(
+                dst_ip=event.dst_ip,
+                domains=sorted(event.domains),
+                protocols=protocols,
+                dist_pps_all_protocols=dist_pps_all_protocols,
+            ))
     return rows

@@ -5,6 +5,7 @@ destination, broken down by domain, and it must NEVER change what
 analyze() detects, decides or how its activation hysteresis evolves,
 whether or not it is called."""
 import unittest
+import unittest.mock
 
 import config.settings as settings
 from core.models import CorrelatedEvent, TelemetryEvent
@@ -57,6 +58,49 @@ class ObservedBenignRatesTests(unittest.TestCase):
         syn = observed_benign_rates(correlated)[0]["protocols"]["TCP_SYN"]
         self.assertEqual(syn["total_pps"], 910.0)
         self.assertEqual(syn["trigger_pps"], 910.0)  # TCP_SYN: trigger = total, mobile included
+
+    def test_dist_pps_all_protocols_sums_every_event_regardless_of_protocol(self):
+        """dist_pps_all_protocols must be the EXACT value
+        _classify_distributed() would use as its own total_pps when
+        _classify() falls through to it (no single protocol's aggregate
+        crossed its own threshold) -- sum of every event's pps, including
+        protocols _PROTOCOL_CHECKS doesn't recognize (e.g. raw "IP")."""
+        events = [
+            _event("enterprise", "UDP", 40.0),
+            _event("mobile", "UDP", 500.0, src="10.60.0.5"),
+            _event("fixed", "IP", 12.0, src="10.92.0.9"),
+        ]
+        correlated = _correlated(events, ["enterprise", "mobile", "fixed"])
+        row = observed_benign_rates([correlated])[0]
+        self.assertEqual(row["dist_pps_all_protocols"], 40.0 + 500.0 + 12.0)
+
+    def test_dist_pps_all_protocols_matches_classify_distributeds_total_pps(self):
+        """Direct cross-check against the real decision path: a group
+        whose events are all an unrecognized protocol never matches any
+        _PROTOCOL_CHECKS entry, so _classify() falls straight through to
+        _classify_distributed() -- confirm the reported aggregate equals
+        exactly what that path computed as total_pps."""
+        events = [_event("enterprise", "IP", 80.0, src=f"10.70.0.{i}") for i in range(1, 6)]
+        correlated = _correlated(events, ["enterprise"])
+        engine = DDoSDetectionEngine()
+        with unittest.mock.patch.object(settings, "DIST_MIN_SOURCES", 1):
+            detection = engine._classify(correlated)
+        self.assertIsNotNone(detection)
+        self.assertEqual(detection.pps, 400.0)
+        row = observed_benign_rates([correlated])[0]
+        self.assertEqual(row["dist_pps_all_protocols"], detection.pps)
+
+    def test_empty_protocols_dict_but_non_empty_events_still_reports_dist_pps(self):
+        """A group whose only traffic is an unrecognized protocol (so
+        `protocols` is empty) must still produce a row -- the old `if
+        protocols:` guard would have silently dropped it, hiding exactly
+        the groups DIST_PPS_THRESHOLD calibration needs most (the
+        protocol-agnostic fallback path)."""
+        events = [_event("enterprise", "IP", 30.0)]
+        correlated = _correlated(events, ["enterprise"])
+        row = observed_benign_rates([correlated])[0]
+        self.assertEqual(row["protocols"], {})
+        self.assertEqual(row["dist_pps_all_protocols"], 30.0)
 
     def test_only_reports_protocols_actually_present(self):
         correlated = [_correlated([_event("enterprise", "UDP", 10.0)], ["enterprise"])]
