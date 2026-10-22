@@ -25,6 +25,7 @@ Run (inside python_xapp_runner):
 
 import argparse
 import json
+import math
 import re
 import signal
 import threading
@@ -64,8 +65,13 @@ class _State:
         # imsi -> {"imsi","gnb_du_id","metrics","updated_at"}
         self.samples = {}
         self.node_count = 0
+        self.last_indication_at = None
+        self.indications = 0
+        self.last_error = None
+        self.nodes_seen = {}
+        self.resubscriptions = {}
 
-    def update(self, gnb_du_id, metrics):
+    def update(self, gnb_du_id, metrics, granul_period_ms=None):
         imsi = GNB_DU_ID_TO_IMSI.get(gnb_du_id)
         if imsi is None:
             return
@@ -75,6 +81,9 @@ class _State:
                 "gnb_du_id": gnb_du_id,
                 "metrics": metrics,
                 "updated_at": time.time(),
+                "granul_period_ms": granul_period_ms,
+                "throughput_unit": "kbps",
+                "time_base": "RAN report granularity",
             }
 
     def snapshot(self):
@@ -83,8 +92,15 @@ class _State:
             fresh = [s for s in self.samples.values()
                      if now - s["updated_at"] <= SAMPLE_TTL_S]
             return {
-                "connected": True,
-                "node_count": self.node_count,
+                "connected": bool(fresh),
+                "node_count": len(fresh),
+                "expected_node_count": self.node_count,
+                "complete": len(fresh)==self.node_count and self.node_count>0,
+                "last_indication_at": self.last_indication_at,
+                "indications": self.indications,
+                "last_error": self.last_error,
+                "nodes_seen": dict(self.nodes_seen),
+                "resubscriptions": dict(self.resubscriptions),
                 "samples": fresh,
             }
 
@@ -117,28 +133,29 @@ class KpmBridge(xAppBase):
         self._du_nodes = du_nodes
         self._api_port = api_port
 
-    def _callback(self, e2_agent_id, subscription_id, indication_hdr,
-                  indication_msg):
-        # oran-sc-ric invokes the indication callback with exactly
-        # (agent, sub, hdr, msg); the report style / ue_id are not passed
-        # for Style 1, so we must not declare them as required args.
-        m = _DU_ID_RE.search(e2_agent_id)
-        if not m:
-            return
-        gnb_du_id = int(m.group(1))
-        meas_data = self.e2sm_kpm.extract_meas_data(indication_msg)
-        metrics = {}
-        for name, value in meas_data.get("measData", {}).items():
-            # style-1 values are single-element lists; keep the scalar.
-            if isinstance(value, list) and value:
-                v = value[0]
-            else:
-                v = value
-            if isinstance(v, float) and v.is_integer():
-                v = int(v)
-            metrics[name] = v
-        if metrics:
-            state.update(gnb_du_id, metrics)
+    def _callback(self, e2_agent_id, subscription_id, indication_hdr, indication_msg):
+        e2_agent_id=e2_agent_id.rstrip('\x00').strip()
+        with state.lock:
+            state.indications+=1
+            state.last_indication_at=time.time()
+            state.nodes_seen[e2_agent_id]=state.last_indication_at
+        try:
+            m = _DU_ID_RE.search(e2_agent_id)
+            if not m:raise ValueError('Unknown DU node identity: '+repr(e2_agent_id))
+            gnb_du_id = int(m.group(1))
+            meas_data = self.e2sm_kpm.extract_meas_data(indication_msg)
+            measured=meas_data.get('measData',{})
+            if not measured:raise ValueError('No node-level measurements in indication; format='+repr(indication_msg.get('indicationMessage-formats',[None])[0]))
+            metrics={}
+            for name,value in measured.items():
+                v=value[-1] if isinstance(value,list) and value else value
+                if isinstance(v,(int,float)) and math.isfinite(v):metrics[name]=v
+            if not metrics:raise ValueError('No valid numeric measurements')
+            state.update(gnb_du_id,metrics,meas_data.get("granulPeriod"))
+            with state.lock:state.last_error=None
+        except Exception as exc:
+            with state.lock:state.last_error=str(exc)
+            print('KPM_CALLBACK_ERROR '+str(exc),flush=True)
 
     @xAppBase.start_function
     def start(self):
@@ -154,7 +171,22 @@ class KpmBridge(xAppBase):
             self.e2sm_kpm.subscribe_report_service_style_1(
                 node, report_period, METRICS, granul_period, self._callback)
 
+        attempted={node:time.time() for node in self._du_nodes}
         while self.running:
+            now=time.time()
+            with state.lock:seen=dict(state.nodes_seen)
+            for node in self._du_nodes:
+                if now-seen.get(node,attempted[node])<=30 or now-attempted[node]<60:continue
+                attempted[node]=now
+                try:
+                    with self._subscription_lock:
+                        obsolete=[obj.subscription_id for obj in self.my_subscriptions.values() if getattr(obj,'e2_node_id',None)==node]
+                    for sid in obsolete:self.unsubscribe(sid)
+                    self.e2sm_kpm.subscribe_report_service_style_1(node,report_period,METRICS,granul_period,self._callback)
+                    with state.lock:state.resubscriptions[node]=state.resubscriptions.get(node,0)+1
+                except Exception as exc:
+                    with state.lock:state.last_error='Resubscribe '+node+': '+str(exc)
+                    print(state.last_error,flush=True)
             time.sleep(1)
 
 

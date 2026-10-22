@@ -16,11 +16,13 @@ concurrencia. Ver §8.
 **confirmado funcionando** tras portar el ID real del AMF al proveedor de medición del CU-CP.
 Ver §7. `amf_ue_ngap_id` y `gnb_cu_ue_f1ap` ahora viajan **juntos** en la misma indicación KPM del
 CU-CP (correlación F1AP, sin tocar CU-UP/E1AP) y se confirmó la cadena de correlación completa
-KPM → AMF → SUPI/IMSI → sesión SMF → sesión UPF, todo automatizado en un solo playbook. Ver §9.
-Fecha: 2026-09-20/21.
+KPM → AMF → SUPI/IMSI → sesión SMF → sesión UPF (en su momento, automatizada en un solo
+playbook; la captura KPM de esa automatización ya no existe tras la migración del RIC, ver §9.4).
+Ver §9. Fecha: 2026-09-20/21.
 
 Automatización: `deploy/vm-lab/ansible/playbooks/test_single_ue.yml`,
-`test_three_ue_broker.yml`, `test_kpm_validation.yml`, `test_split_cu_du.yml` — ver §5 y §9.
+`test_three_ue_broker.yml`, `test_split_cu_du.yml` — ver §5 y §9 (`test_kpm_validation.yml`,
+construido contra el near-RT RIC anterior a la migración, se quitó -- ver §9.4).
 
 ## 1. Reemplazo de OCUDU por srsRAN Project
 
@@ -109,24 +111,10 @@ dentro del masquerade `10.10.0.0/24` que el control node ya tenía).
 
 ## 4. E2SM-KPM: subscribe+indicate con atribución real por UE
 
-### 4.1. `xapp_kpm_moni` contra el RIC real (no el simulador ns-3)
-
 Importante: `simulation/parse_xapp_kpm_log.py` y `ddos_xapp_events.csv` son de un pipeline
-**distinto**, basado en ns-3 — no confundir con esto. Acá se usó el propio binario de ejemplo de
-FlexRIC (`/opt/flexric/build/examples/xApp/c/monitor/xapp_kpm_moni`) contra el `nearRT-RIC` real
-de la VM `ric`, suscrito al gNB real.
+**distinto**, basado en ns-3 — no confundir con esto.
 
-Dos bugs encontrados y arreglados en el camino (ambos ya en `gnb_zmq.yaml.j2`):
-
-1. **`-a 127.0.0.1` cuelga para siempre** ("Resending Setup Request after timeout") — el
-   `nearRT-RIC` solo bindea sus sockets SCTP (E2AP 36421, E42 36422) en su dirección real
-   (`ric_addr`, confirmado vía `ss`/`lsof`), nunca en loopback. Hay que usar `-a {{ ric_addr }}`.
-2. **`e2sm_rc_enabled: true` crashea el xApp** con un `assert()` fallido decodificando el
-   service model RC (`rc_dec_asn.c:dec_ran_func_ctrl_it`, un campo ASN.1 no implementado en este
-   build de FlexRIC) — pasa ANTES de que el xApp llegue siquiera a suscribirse a KPM. Como este
-   lab no usa RIC Control, se deshabilitó (`e2sm_rc_enabled: false`).
-
-### 4.2. Atribución por UE (Style 4/5, no solo agregado por celda)
+### Atribución por UE (Style 4/5, no solo agregado por celda)
 
 Con el gNB arrancando limpio, las indicaciones SÍ llegaban, pero **ninguna traía identidad de
 UE** — todas Format 1 (agregado de celda). Rastreado hasta el código real de srsRAN Project:
@@ -401,17 +389,6 @@ UE ID type = gNB, amf_ue_ngap_id = 37
 gnb_cu_ue_f1ap = 0
 ```
 
-### 9.2. Bug encontrado en el xApp de ejemplo: escondía uno de los dos IDs
-
-Con el patch de 9.1 ya llenando ambos campos, `xapp_kpm_moni.c`'s propio `log_gnb_ue_id()`
-seguía imprimiendo **solo uno** — su `if/else` original trataba "hay lista F1AP" y "hay
-`amf_ue_ngap_id`" como mutuamente excluyentes, cuando en realidad `amf_ue_ngap_id` es un campo
-obligatorio de la IE `UEID-GNB` (no parte del choice opcional de la lista F1AP) y un proveedor
-real puede legítimamente llenar los dos en el mismo record. Arreglado imprimiendo
-`amf_ue_ngap_id` incondicionalmente y la lista F1AP si está presente, sin `else`. Bundleado como
-3er fix en el ya existente `flexric-kpm-moni-workaround.patch` (`ric_flexric/files/`) — el bug
-vivía en el xApp de ejemplo, no en el protocolo ni en FlexRIC.
-
 ### 9.3. Cadena de correlación con el core confirmada de punta a punta
 
 Con `amf_ue_ngap_id` disponible por KPM, se confirmó que corresponde exactamente a la misma
@@ -434,27 +411,25 @@ ampliando la ventana de búsqueda (`grep -A30`) y buscando directamente `'UE SUP
 
 ### 9.4. Automatización: `playbooks/test_split_cu_du.yml`
 
-Playbook nuevo (~330 líneas, 5 plays) que cubre de punta a punta el split CU/DU de §8 **y** la
-correlación de esta sección, con tags para correr solo un tramo:
+Playbook que cubre de punta a punta el split CU/DU de §8, con tags para correr solo un tramo:
 
 1. **`ran_srsran`** (sin tag): mata cualquier `srscu` viejo, lanza uno limpio, confirma que sigue
    vivo.
 2. **`du_srsran`** (sin tag): mata cualquier `srsdu` viejo, lanza uno limpio, confirma que sigue
    vivo Y que la asociación SCTP de F1 real está arriba (`grep -cE '\s38472\s'
    /proc/net/sctp/assocs` — ver bug de formato abajo).
-3. **`ue_srsue`** (sin tag; ping de víctima con tag `victim`, tráfico de fondo con tag `kpm`):
-   mata cualquier `srsue` viejo, lo lanza con la config split-DU, sondea hasta 12×2s por "PDU
-   Session Establishment successful", falla con guía de reintento si no aparece (la flakiness de
-   RACH de §2/§6 sigue aplicando aquí — no es un bug nuevo de la automatización, ver más abajo).
-4. **`ric_flexric`** (tag `kpm`): mata cualquier `xapp_kpm_moni` viejo, reinicia el `nearRT-RIC`
-   si no está corriendo, captura KPM 12s, extrae el par `amf_ue_ngap_id`/`gnb_cu_ue_f1ap` de la
-   misma indicación.
-5. **`core5g_open5gs`** (tag `correlate`): toma el `amf_ue_ngap_id` capturado por el play
-   anterior (vía `hostvars`), y reconstruye la tabla completa de 9.3 grepeando
-   `docker logs open5gs_5gc`.
+3. **`ue_srsue`** (sin tag; ping de víctima con tag `victim`): mata cualquier `srsue` viejo, lo
+   lanza con la config split-DU, sondea hasta 12×2s por "PDU Session Establishment successful",
+   falla con guía de reintento si no aparece (la flakiness de RACH de §2/§6 sigue aplicando aquí
+   — no es un bug nuevo de la automatización, ver más abajo).
 
-**Confirmado en una corrida real** (`--tags kpm,correlate`, reusando un attach previo):
-`PLAY RECAP` sin fallos, tabla de correlación completa e idéntica a la de 9.3 impresa al final.
+La captura KPM + correlación con el core que este playbook hacía antes (plays 4-5, tags
+`kpm`/`correlate`) se quitó tras la migración del RIC: estaba construida directamente contra el
+binario de xApp de ejemplo del near-RT RIC anterior y no es portable a oran-sc-ric sin
+reescribirla contra `oran_bridge/kpm_bridge_xapp.py`. El parche que hace viajar juntos
+`amf_ue_ngap_id` y `gnb_cu_ue_f1ap` (§9.1) sigue vigente; la tabla de correlación de §9.3 sigue
+siendo el resultado real obtenido cuando esa automatización todavía existía, no una confirmación
+vigente de la pila actual.
 
 **Bugs encontrados y arreglados mientras se construía este playbook** (más allá de los ya
 cubiertos en 9.1-9.3):

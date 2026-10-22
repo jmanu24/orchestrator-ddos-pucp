@@ -12,9 +12,9 @@ LAB_CALIBRATION_MODE = os.getenv("LAB_CALIBRATION_MODE", "false").lower() == "tr
 # exercised with real switches again.
 COLLECT_INTERVAL = 0.5
 
-SYN_THRESHOLD = 10
-UDP_THRESHOLD = 200
-ICMP_THRESHOLD = 150
+SYN_THRESHOLD = 76.82
+UDP_THRESHOLD = 14515.64
+ICMP_THRESHOLD = 240.37
 
 DECISION_THRESHOLD = 1.5
 
@@ -462,7 +462,7 @@ BNG_DIST_FREERADIUS_BLOCKED_DIR = "/var/lib/ddos-radius-blocked"
 # ---------------------------------------------------------------------
 # Mobile domain -- real srsRAN Project + Open5GS VM lab pipeline.
 #
-# Neither Open5GS nor FlexRIC expose a live query API for the one thing
+# Neither Open5GS nor the near-RT RIC expose a live query API for the one thing
 # this domain actually needs (which UE, identified by subscriber, is
 # sending how much traffic to which destination) -- that state only
 # ever exists in each NF's own process memory, surfaced only via
