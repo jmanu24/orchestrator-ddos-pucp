@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """O-RAN SC RIC KPM bridge xApp.
 
-Replaces the FlexRIC-based oran_bridge/kpm_telemetry_api.py after the RIC
+Replaces this lab's previous near-RT RIC-era KPM bridge after the RIC
 migration (see docs). Runs inside the oran-sc-ric python_xapp_runner
 container: it subscribes to every srsRAN DU E2 node for the UL radio KPM
 that mobile detection needs, and re-exposes the latest per-UE sample over
@@ -9,7 +9,7 @@ a plain HTTP GET /kpm -- the exact same shape core5g's ue_telemetry_api
 already polls, so nothing downstream changes except the join key (imsi,
 not amf_ue_ngap_id -- see below).
 
-Why this is so much simpler than the FlexRIC path: the O-RAN SC RIC
+Why this is so much simpler than that previous path: the O-RAN SC RIC
 registers each srsRAN DU as its OWN E2 node, named gnbd_<plmn>_<gnbid>_<N>
 where N is the DU's gnb_du_id. So the source node of every KPM indication
 is known (xAppBase hands it to the callback as e2_agent_id), and since

@@ -72,9 +72,9 @@ def _format_mitigation_message(action) -> str:
     throttle -- it's just what triggered the decision, already reported
     by the ATTACK DETECTED line a few lines up. What an E2SM-RC slice-
     association control actually needs to locate and quarantine the UE
-    is its identity and which gNB/E2 node it's attached to (see Option 1
-    in the FlexRIC investigation: control_sm_xapp_api() takes a UE id and
-    E2 node id, not a destination), plus how long the quarantine should
+    is its identity and which gNB/E2 node it's attached to (see the
+    E2SM-RC control investigation: a slice-association control request
+    takes a UE id and E2 node id, not a destination), plus how long the quarantine should
     last -- so that's what this message reports instead.
     """
     verb = _MITIGATION_VERBS.get(action.domain, {}).get(action.action, action.action.upper())

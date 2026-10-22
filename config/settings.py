@@ -462,7 +462,7 @@ BNG_DIST_FREERADIUS_BLOCKED_DIR = "/var/lib/ddos-radius-blocked"
 # ---------------------------------------------------------------------
 # Mobile domain -- real srsRAN Project + Open5GS VM lab pipeline.
 #
-# Neither Open5GS nor FlexRIC expose a live query API for the one thing
+# Neither Open5GS nor the near-RT RIC expose a live query API for the one thing
 # this domain actually needs (which UE, identified by subscriber, is
 # sending how much traffic to which destination) -- that state only
 # ever exists in each NF's own process memory, surfaced only via
