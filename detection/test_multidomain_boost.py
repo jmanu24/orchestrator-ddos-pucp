@@ -45,7 +45,7 @@ class SingleSourceBoostTests(unittest.TestCase):
 
     def test_unboosted_even_when_the_group_also_has_another_domains_benign_traffic(self):
         # Enterprise UDP flood well past UDP_THRESHOLD (200): 600pps -> score 3.0.
-        attacker = _event("enterprise", "10.70.0.11", "UDP", 600.0)
+        attacker = _event("enterprise", "10.70.0.11", "UDP", 43546.92)
         # Benign mobile SYN traffic toward the SAME dst_ip, same cycle, far
         # below SYN_THRESHOLD (10) -- never itself a detection, but its mere
         # presence used to be enough (via CorrelatedEvent.domains) to boost
@@ -73,7 +73,7 @@ class DistributedBoostTests(unittest.TestCase):
     def setUp(self):
         self.engine = DDoSDetectionEngine()
 
-    def _five_enterprise_sources(self, pps=50.0):
+    def _five_enterprise_sources(self, pps=3628.9):
         return [_event("enterprise", f"10.70.0.{i}", "UDP", pps) for i in range(1, 6)]
 
     def test_single_domain_distributed_attack_is_not_boosted(self):
@@ -101,11 +101,11 @@ class DistributedBoostTests(unittest.TestCase):
         # clears UDP_THRESHOLD (200) even though 2 of the 5 sources here
         # don't count toward that check at all.
         sources = [
-            _event("enterprise", "10.70.0.1", "UDP", 100.0),
-            _event("enterprise", "10.70.0.2", "UDP", 100.0),
-            _event("mobile", "10.45.1.2", "UDP", 100.0),
-            _event("mobile", "10.45.1.3", "UDP", 100.0),
-            _event("broadband", "10.20.0.201", "UDP", 100.0),
+            _event("enterprise", "10.70.0.1", "UDP", 7257.82),
+            _event("enterprise", "10.70.0.2", "UDP", 7257.82),
+            _event("mobile", "10.45.1.2", "UDP", 7257.82),
+            _event("mobile", "10.45.1.3", "UDP", 7257.82),
+            _event("broadband", "10.20.0.201", "UDP", 7257.82),
         ]
         event = _correlated(sources, domains=["enterprise", "mobile", "broadband"])
 
@@ -148,7 +148,7 @@ class PerSourceMinPpsTests(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_trivial_contributor_is_excluded_from_sources_but_not_from_detection(self):
-        sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 50.0) for i in range(1, 6)]
+        sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 3628.9) for i in range(1, 6)]
         trivial = _event("enterprise", "10.70.0.99", "UDP", 0.5)  # below the 1.0pps floor
         event = _correlated(sources + [trivial], domains=["enterprise"])
 
@@ -161,7 +161,7 @@ class PerSourceMinPpsTests(unittest.TestCase):
         self.assertIn("10.70.0.99", detection.source_domains)
 
     def test_all_contributors_above_the_floor_are_all_kept(self):
-        sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 50.0) for i in range(1, 6)]
+        sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 3628.9) for i in range(1, 6)]
         event = _correlated(sources, domains=["enterprise"])
 
         detection = self.engine._classify(event)
@@ -175,7 +175,7 @@ class PerSourceMinPpsTests(unittest.TestCase):
         # while it's a real contributor -- mobile has its own KPM-based
         # activation gate deciding whether it's attacking at all, so the
         # pps floor must never be the thing that drops it from `sources`.
-        enterprise_sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 50.0) for i in range(1, 6)]
+        enterprise_sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 3628.9) for i in range(1, 6)]
         under_reported_ue = _event("mobile", "10.45.1.6", "UDP", 0.3)  # under the 1.0pps floor
         event = _correlated(enterprise_sources + [under_reported_ue], domains=["enterprise", "mobile"])
 

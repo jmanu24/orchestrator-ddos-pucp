@@ -24,14 +24,14 @@ class FakeClock:
         self.now += seconds
 
 
-def _enterprise_flood(src="10.70.0.11", pps=900.0):
+def _enterprise_flood(src="10.70.0.11", pps=20000.0):
     ev = TelemetryEvent(domain="enterprise", device_id="1", src_ip=src, dst_ip=DST,
                         dst_port=53, protocol="UDP", pps=pps, bps=pps * 100)
     return CorrelatedEvent(dst_ip=DST, total_pps=pps, total_bps=pps * 100,
                            domains=["enterprise"], events=[ev])
 
 
-def _bgp_flood(pps=900.0):
+def _bgp_flood(pps=20000.0):
     ev = TelemetryEvent(domain="bgp", device_id="r1", src_ip="10.30.0.2", dst_ip=DST,
                         dst_port=53, protocol="UDP", pps=pps, bps=pps * 100)
     return CorrelatedEvent(dst_ip=DST, total_pps=pps, total_bps=pps * 100,
