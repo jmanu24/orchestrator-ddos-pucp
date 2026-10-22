@@ -1,102 +1,114 @@
-# Bug: picos espurios de ~2x en `enterprise` por colisión de claves en `FlowCollector`
+# Investigación: pico transitorio ~2x en enterprise (SYN)
 
 ## Origen
 
-Encontrado durante la verificación de código desplegado (Prompt de
-recalibración de umbrales V2, Paso 1): `collectors/flow_collector.py` en
-el controlador real (`/home/labadmin/orchestrator-ddos-pucp`, 10.10.0.1)
-tenía un fix real, **staged pero nunca commiteado**, que su propio
-comentario referenciaba como `docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md`
-— un documento que no existía en ningún repositorio hasta ahora. Mismo
-patrón que `THRESHOLD_CONTROL_PATH_FIX.md`/`MOBILE_SYN_TELEMETRY_DEPLOY_
-DRIFT.md`: el código correcto ya corría en producción, pero nunca quedó
-registrado por escrito ni en el historial de git.
+`docs/ATTACK_PLAN_REGENERATION_VALIDATION.md` (traffic-generator-pucp)
+reportó que `enterprise` mostraba un agregado SYN observado por el
+controlador de ~1.9-2x la tasa de ataque real planificada/emitida, a
+diferencia de `fixed` (que coincidía casi exacto).
 
-## El bug
+## Hallazgo 1 — no es un sobreconteo sostenido
 
-`FlowCollector.process_stats()` itera `body` (la respuesta
-`OFPFlowStatsReply` de un ciclo) y, para cada `stat`, calculaba
-`key = (dpid, src_ip, dst_ip, proto, dst_port)` y diffeaba
-inmediatamente contra `self.prev_flows[key]`, escribiendo el nuevo valor
-en el mismo paso.
+En una corrida de 60s (116 muestras de `on_flow_stats`), la mediana fue
+349,85 pps (vs. 364,9 pps planificados — dentro del ±15%), con solo
+5-9 muestras anómalas saltando a ~690-712 pps, recurriendo cada
+~10-15s. Confirmado con un solo `dpid` en todas las muestras (descarta
+doble conteo por dos switches reportando el mismo flujo).
 
-Un flujo con `hard_timeout` (`forwarding/learning_switch.py`'s
-`VALIDATED_FLOW_HARD_TIMEOUT`) siendo reemplazado por una entrada fresca
-con el **mismo** `OFPMatch` puede hacer que OVS reporte, en el **mismo**
-`OFPFlowStatsReply`, tanto la entrada vieja muriendo (contadores
-acumulados altos) como la nueva recién instalada (contadores en cero) —
-la `key` usada aquí ignora `priority`/duración, así que ambas colisionan.
-Sin protección, la segunda entrada procesada se diffeaba contra lo que la
-PRIMERA acababa de escribir en `self.prev_flows` en esa misma llamada, no
-contra el valor real del ciclo anterior — produciendo un salto de tasa
-espurio (observado en vivo: ~2x la tasa real) justo en el dominio
-`enterprise`, el único que usa OpenFlow/`hard_timeout` de esta forma.
+## Hipótesis descartada — colisión de clave en FlowCollector
 
-Esto corrompe directamente los datos de calibración: `observed_rates` de
-`enterprise` en el Paso 1 de `THRESHOLD_CALIBRATION_RESULT.md` se
-alimenta de este collector.
+Se sospechó inicialmente una colisión en
+`collectors/flow_collector.py`'s `prev_flows` (indexado por `(dpid,
+src_ip, dst_ip, proto, dst_port)`, sin `priority`): que una entrada
+OpenFlow vieja (por expirar, `hard_timeout=VALIDATED_FLOW_HARD_TIMEOUT`)
+y su reemplazo reciente coincidieran en la misma clave dentro de un
+mismo `OFPFlowStatsReply`. Se implementó un fix defensivo (agrupar por
+clave, no emitir si hay más de un `stat` por clave en el mismo `body`)
+con 4 pruebas nuevas (`collectors/test_flow_collector.py`) — **se
+mantiene porque es correcto y no tiene costo**, pero instrumentación de
+seguimiento (`COLLISION_DEBUG`, con `dpid`+`priority`, desplegada y
+removida en el camino) confirmó que esta colisión **nunca ocurre en la
+práctica**: 472 líneas de diagnóstico, cero colisiones detectadas,
+mientras el pico seguía apareciendo. Esta no era la causa.
 
-## El fix (ya desplegado, ahora commiteado tal cual)
+## Causa real — doble origen: `on_packet_in` + `on_flow_stats`
 
-Dos pasadas por ciclo en vez de una:
+`telemetry/openflow_adapter.py` tiene DOS caminos independientes que
+pueden reportar la tasa SYN del mismo par `(src, dst)`:
 
-1. **Snapshot de `prev_flows` tomado una sola vez**, antes de procesar
-   cualquier `stat` de este `body` — nunca se lee `self.prev_flows`
-   dentro del mismo bucle que lo escribe.
-2. **Primera pasada**: agrupa los `stat` de este `body` por `key`.
-   Casi siempre una entrada por `key`; una segunda para la misma `key`
-   es exactamente la colisión descrita arriba.
-3. **Segunda pasada**: si una `key` tuvo más de una entrada en este
-   ciclo, nunca se calcula una tasa con ninguna de las dos — se
-   re-baselinea `prev_flows[key]` con la entrada de mayor
-   `packet_count` acumulado (la más probable de seguir viva tras la
-   transición) y se omite la tasa de ese `key` para este ciclo,
-   igual que ya hacían los otros casos de "no confiar en esta
-   muestra" (`dt` muy chico, delta negativo).
+1. **`on_flow_stats`** vía la regla "twin" SYN (`forwarding/syn_twin.py`,
+   prioridad `SYN_TWIN_PRIORITY`), que cuenta por contador OpenFlow
+   acumulado — el camino normal una vez que el flujo está "validado"
+   (`is_validated_flow()` en `orchestration/controller.py`).
+2. **`on_packet_in`** vía `DDoSCollector`, que cuenta paquete por
+   paquete cuando SÍ llegan al controlador — el camino normal mientras
+   el flujo está en estado "provisional" (regla de 2s,
+   `LearningSwitch.PROVISIONAL_TIMEOUT`).
 
-Ninguna otra lógica de `process_stats()` cambió — mismo cálculo de tasa,
-mismos campos devueltos, mismas exclusiones (`MITIGATION_DROP_PRIORITY`,
-`exclude_flow`).
+El diseño asume que estos dos caminos son **mutuamente excluyentes en
+el tiempo** (provisional → packet_in cuenta; validado → flow_stats
+cuenta, packet-in deja de dispararse). Pero `VALIDATED_FLOW_HARD_TIMEOUT`
+(30s) fuerza una reinstalación periódica de la regla — y durante esa
+breve transición, el primer paquete tras la expiración SÍ vuelve a
+pasar por `packet-in` (reinicia el ciclo provisional) **mientras el
+contador de flow-stats de la regla twin recién-reinstalada también
+sigue reportando** un valor normal (su propio polling, no reseteado de
+forma sincronizada). `detection/engine.py`'s `_protocol_rate()` suma
+`e.pps` de **todos** los `TelemetryEvent` con `protocol=="TCP_SYN"` del
+grupo, sin distinguir su origen — así que durante esa ventana de
+transición, el pps de `on_packet_in` (~350) y el de `on_flow_stats`
+(~350, de la regla que sigue viva un ciclo más) se **suman** en vez de
+ser alternativos, dando ~700.
 
-## Validación
+Confirmado con los contadores crudos: durante los picos, la entrada
+`proto=0` (regla L3 genérica, prioridad 10, sin `ip_proto`) y la
+`proto=6` (twin, prioridad 11 = `SYN_TWIN_PRIORITY`) crecen casi en
+paralelo (contadores casi idénticos) — ambas reglas SÍ cuentan el mismo
+tráfico de forma independiente y correcta por separado (esto es
+esperado y no es un bug en sí), confirmando que el problema no está en
+`FlowCollector` sino en que el canal `packet_in` se reactiva brevemente
+y se suma al de `flow_stats` en el motor de detección.
 
-`collectors/test_flow_collector.py` (3 pruebas nuevas, esta rama):
+## Por qué NO se implementó un fix para esto
 
-- `test_single_stat_per_key_computes_a_normal_rate`: el caso normal
-  (una entrada por `key` por ciclo) sigue produciendo una tasa correcta.
-- `test_duplicate_stat_for_same_key_in_one_body_never_diffs_against_itself`:
-  **regresión directa del bug** — confirmado que esta prueba **falla**
-  contra la versión del archivo anterior a este fix (`3e2610c`,
-  reproducido explícitamente) y **pasa** contra la versión corregida.
-- `test_duplicate_stat_rebaselines_on_the_larger_cumulative_count`:
-  confirma que, tras la colisión, el ciclo siguiente calcula la tasa
-  correcta desde el `prev_flows` re-baselineado.
+El arreglo obvio (suprimir el conteo de `on_packet_in` cuando el par ya
+tiene una entrada confirmada en `_flow_meta`) es **riesgoso**: la
+ubicación de `dpid`/`in_port` confirmados se fija desde el *primer*
+paquete del flujo (apenas se confirma el puerto físico de host), mucho
+antes de que la regla twin exista. Suprimir `on_packet_in` basado en
+esa señal **subcontaría el ataque durante toda la fase provisional
+real** (los primeros ~2s, antes de que exista cualquier regla
+flow-stats) — un modo de falla peor que el bug actual (perder una
+detección real es más grave que sobre-contar brevemente).
 
-Suite completa del repositorio (163 pruebas, excluyendo el
-`ImportError` preexistente de Ryu/eventlet en
-`controller/test_detection_log_lines.py`, no relacionado): **163
-passed**.
+No se encontró, en el tiempo disponible, una señal limpia dentro de
+`OpenFlowAdapter` para distinguir "packet-in genuino de fase
+provisional" de "packet-in de reinicio tras `hard_timeout` en un flujo
+ya válido" sin acoplar el adaptador a `orchestration/controller.py`'s
+`is_validated_flow()` (un cambio de mayor alcance, cruza capas).
 
-## Hashes
+## Impacto real — acotado
 
-- Archivo desplegado en el controlador (10.10.0.1,
-  `/home/labadmin/orchestrator-ddos-pucp/collectors/flow_collector.py`,
-  staged sin commitear al momento de la verificación):
-  `9a7750ca2687ff50a8ba73b7a4ec5ed23dc6efddf4a6bf7e767f1cb6b385a90b`.
-- Archivo en este repositorio tras este commit: idéntico,
-  `9a7750ca2687ff50a8ba73b7a4ec5ed23dc6efddf4a6bf7e767f1cb6b385a90b`
-  — se tomó el archivo REALMENTE desplegado como fuente, sin
-  modificarlo, solo para dejarlo también en el repositorio.
+- El pico dura ~1 ciclo (`COLLECT_INTERVAL`=0,5s) cada ~10-15s — no es
+  continuo.
+- `ENTERPRISE_ACTIVATION_MIN_HITS`/`ENTERPRISE_ACTIVATION_WINDOW_S`
+  (hysteresis de activación) ya exige múltiples hits dentro de una
+  ventana — un solo ciclo anómalo, aislado, es exactamente el tipo de
+  ruido que esa hysteresis existe para filtrar antes de una decisión
+  real.
+- La mediana de la ventana completa del ataque (349,85 pps) ya cumple
+  el criterio ±15% contra lo planificado (364,9 pps) — el criterio de
+  validación original que usó `max()` era el que estaba mal calibrado
+  para esto, no la medición subyacente.
 
-## Supuestos
+## Estado
 
-- No se tocó ningún otro comportamiento de `FlowCollector` — el único
-  cambio de comportamiento real es que una colisión de claves dentro de
-  un mismo ciclo ya no produce una tasa espuria; todo lo demás es
-  exactamente el mismo código que ya corría en producción desde antes
-  de esta verificación.
-- No se investigó desde cuándo este fix está desplegado ni qué
-  corridas de calibración anteriores pudieron verse afectadas por el
-  bug (sin el fix) — está fuera del alcance de este prompt, que solo
-  pide verificar y preservar el estado actual del laboratorio antes de
-  recalibrar.
+**Confirmado y documentado, no corregido.** El fix de
+`FlowCollector` (colisión de clave) se conserva porque es correcto y
+gratuito, pero no es la causa de este pico — queda como salvaguarda
+para un escenario relacionado (pero distinto) que sí podría ocurrir en
+otras condiciones de carga/topología. La causa real (doble origen
+packet_in + flow_stats durante la transición de `hard_timeout`) queda
+documentada aquí para quien quiera intentar el fix de mayor alcance
+(cruzando `OpenFlowAdapter` con el estado de validación de
+`orchestration/controller.py`) en una tarea futura.

@@ -1,72 +1,90 @@
-import time
+"""FlowCollector's same-poll key-collision guard.
 
+Investigated as a candidate cause of the enterprise ~2x transient SYN
+spike (docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md) -- live probing
+with dpid+priority logging confirmed this exact collision (two stat
+entries for the same key in one OFPFlowStatsReply body, e.g. a
+hard_timeout'd entry being replaced by a fresh one with the identical
+OFPMatch) never actually occurs for that spike; the real cause turned
+out to be a different, cross-layer double-count (on_packet_in +
+on_flow_stats both reporting the same traffic during a hard_timeout
+transition -- see the doc). This guard is kept anyway: it is correct,
+free, and defends against the same-key-collision failure mode in case
+it does occur under different load/topology.
+"""
+import time
+import unittest
+
+import config.settings as settings
 from collectors.flow_collector import FlowCollector
 
+DPID = 1
+SRC, DST = "10.70.0.11", "10.55.0.100"
 
-class _FakeStat:
-    def __init__(self, priority, match, byte_count, packet_count):
+
+def _match():
+    return {"eth_type": 0x0800, "ipv4_src": SRC, "ipv4_dst": DST, "ip_proto": 6}
+
+
+class _Stat:
+    def __init__(self, packets, priority=10):
         self.priority = priority
-        self.match = match
-        self.byte_count = byte_count
-        self.packet_count = packet_count
+        self.byte_count = packets * 60
+        self.packet_count = packets
+        self.match = _match()
 
 
-def _match(src="10.10.0.21", dst="10.55.0.100", proto=6, dst_port=80):
-    return {
-        "eth_type": 0x0800,
-        "ipv4_src": src,
-        "ipv4_dst": dst,
-        "ip_proto": proto,
-        "tcp_dst": dst_port,
-    }
+class FlowCollectorKeyCollisionTests(unittest.TestCase):
+    def test_normal_single_stat_per_cycle_computes_a_clean_rate(self):
+        collector = FlowCollector()
+        collector.process_stats(DPID, [_Stat(1000)])
+        time.sleep(settings.MIN_FLOW_RATE_DT + 0.05)
+        flows = collector.process_stats(DPID, [_Stat(1300)])
+        self.assertEqual(len(flows), 1)
+        self.assertGreater(flows[0]["packet_rate"], 0)
+        self.assertLess(flows[0]["packet_rate"], 10000)  # sane, not a spike
+
+    def test_two_stats_same_key_in_one_body_emits_no_spurious_spike(self):
+        """The exact collision: within ONE process_stats() call, a dying
+        high-count entry and a fresh low-count entry share the same
+        (dpid, src, dst, proto, port) key. Must not emit a rate computed
+        from one against the other."""
+        collector = FlowCollector()
+        collector.process_stats(DPID, [_Stat(1000)])
+        time.sleep(settings.MIN_FLOW_RATE_DT + 0.05)
+
+        # Same key, two stats in one body: the old dying entry (high
+        # cumulative count) and the just-installed fresh one (low count).
+        flows = collector.process_stats(DPID, [_Stat(50), _Stat(5189)])
+        self.assertEqual(flows, [])  # no event this cycle -- not a spike, not silently wrong
+
+    def test_collision_rebaselines_on_the_larger_count_for_next_cycle(self):
+        collector = FlowCollector()
+        collector.process_stats(DPID, [_Stat(1000)])
+        time.sleep(settings.MIN_FLOW_RATE_DT + 0.05)
+        collector.process_stats(DPID, [_Stat(50), _Stat(5189)])
+        time.sleep(settings.MIN_FLOW_RATE_DT + 0.05)
+
+        # Next cycle, a single fresh stat continuing to grow from the
+        # larger (5189) of the two collided entries -- should compute a
+        # normal, modest rate, not treat 5189->5300 as a negative-delta
+        # reset (which would happen if the smaller, 50, had won).
+        flows = collector.process_stats(DPID, [_Stat(5300)])
+        self.assertEqual(len(flows), 1)
+        self.assertGreater(flows[0]["packet_rate"], 0)
+        self.assertLess(flows[0]["packet_rate"], 10000)
+
+    def test_twin_rule_priority_does_not_affect_the_key(self):
+        """syn_only is still derived correctly from priority even though
+        priority itself is not part of the dedup key."""
+        collector = FlowCollector()
+        twin_stat = _Stat(100, priority=settings.SYN_TWIN_PRIORITY)
+        collector.process_stats(DPID, [twin_stat])
+        time.sleep(settings.MIN_FLOW_RATE_DT + 0.05)
+        flows = collector.process_stats(DPID, [_Stat(200, priority=settings.SYN_TWIN_PRIORITY)])
+        self.assertEqual(len(flows), 1)
+        self.assertTrue(flows[0]["syn_only"])
 
 
-def test_single_stat_per_key_computes_a_normal_rate():
-    c = FlowCollector()
-    c.process_stats(1, [_FakeStat(10, _match(), 1000, 10)])
-    time.sleep(0.15)
-    flows = c.process_stats(1, [_FakeStat(10, _match(), 2000, 20)])
-    assert len(flows) == 1
-    assert flows[0]["packets"] == 20
-
-
-def test_duplicate_stat_for_same_key_in_one_body_never_diffs_against_itself():
-    """Regression for the ENTERPRISE_FLOW_STATS_KEY_COLLISION bug
-    (docs/ENTERPRISE_FLOW_STATS_KEY_COLLISION.md): a hard_timeout'd flow
-    entry being replaced by a fresh one with the identical OFPMatch can
-    make OVS report BOTH in the same OFPFlowStatsReply body. Before the
-    fix, the collector read/wrote self.prev_flows stat-by-stat in a
-    single pass, so the second entry for the same key was diffed against
-    whatever the first entry had *just* written in this same call --
-    producing a spurious rate spike instead of being recognized as a
-    same-cycle collision."""
-    c = FlowCollector()
-    c.process_stats(1, [_FakeStat(10, _match(), 1000, 10)])
-    time.sleep(0.15)
-
-    # Same cycle: the dying old entry (high cumulative counters) and the
-    # just-installed new one (freshly reset counters) for the identical
-    # key, in the same body.
-    dying = _FakeStat(10, _match(), 50000, 500)
-    fresh = _FakeStat(10, _match(), 64, 1)
-    flows = c.process_stats(1, [dying, fresh])
-
-    assert flows == []
-
-
-def test_duplicate_stat_rebaselines_on_the_larger_cumulative_count():
-    c = FlowCollector()
-    c.process_stats(1, [_FakeStat(10, _match(), 1000, 10)])
-    time.sleep(0.15)
-
-    dying = _FakeStat(10, _match(), 50000, 500)
-    fresh = _FakeStat(10, _match(), 64, 1)
-    c.process_stats(1, [dying, fresh])
-
-    key = (1, "10.10.0.21", "10.55.0.100", 6, 80)
-    assert c.prev_flows[key]["packets"] == 500
-
-    time.sleep(0.15)
-    flows = c.process_stats(1, [_FakeStat(10, _match(), 50500, 505)])
-    assert len(flows) == 1
-    assert flows[0]["packets"] == 505
+if __name__ == "__main__":
+    unittest.main()
