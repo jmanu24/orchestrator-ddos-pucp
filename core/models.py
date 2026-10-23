@@ -117,6 +117,15 @@ class DetectionResult:
     pps/bps     : the representative event's measured rate at detection
                   time — carried through purely for observability
                   (audit records)
+    source_pps  : src_ip -> that source's own measured pps at detection
+                  time (same values _classify_distributed()'s
+                  pps_by_src already computed before filtering `sources`
+                  via _blockable_sources) — only populated alongside
+                  `sources`, purely for observability (audit records);
+                  lets a later analysis see which sources DIST_PER_SOURCE_
+                  MIN_PPS excluded and why, instead of only the already-
+                  filtered list. Never read back by detection/mitigation
+                  logic itself.
     activation_delay_s : how long detection/engine.py's own activation
                   hysteresis (ENTERPRISE_ACTIVATION_*, PEERING_ACTIVATION_*,
                   BROADBAND_ACTIVATION_*, MOBILE_SYN_ACTIVATION_*) held this
@@ -151,6 +160,7 @@ class DetectionResult:
     in_port: int = 0
     pps: float = 0.0
     bps: float = 0.0
+    source_pps: Dict[str, float] = field(default_factory=dict)
     activation_delay_s: float = 0.0
     timestamp: float = field(
         default_factory=lambda: datetime.now().timestamp()
