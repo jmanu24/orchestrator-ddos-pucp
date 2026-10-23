@@ -360,6 +360,7 @@ class DDoSDetectionEngine:
                 source_domains=source_domains,
                 pps=total_pps,
                 bps=total_bps,
+                source_pps=dict(pps_by_src),
             )
 
         # Single attacker — narrow down to its own events first, then among
@@ -524,6 +525,7 @@ class DDoSDetectionEngine:
             source_domains=source_domains,
             pps=total_pps,
             bps=total_bps,
+            source_pps=dict(pps_by_src),
         )
 
     @staticmethod

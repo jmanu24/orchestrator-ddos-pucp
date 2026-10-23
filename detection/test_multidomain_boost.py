@@ -168,6 +168,25 @@ class PerSourceMinPpsTests(unittest.TestCase):
 
         self.assertEqual(set(detection.sources), {s.src_ip for s in sources})
 
+    def test_source_pps_reports_every_contributor_even_ones_filtered_from_sources(self):
+        """PILOT2_RESULT.md (2026-10-23): source_pps is pure observability
+        (core/models.py's own docstring) -- it must report every
+        contributor's own pps, including the trivial one DIST_PER_SOURCE_
+        MIN_PPS excludes from `sources`, so a later analysis can see WHY
+        a given source was or wasn't individually mitigated."""
+        sources = [_event("enterprise", f"10.70.0.{i}", "UDP", 3628.9) for i in range(1, 6)]
+        trivial = _event("enterprise", "10.70.0.99", "UDP", 0.5)
+        event = _correlated(sources + [trivial], domains=["enterprise"])
+
+        detection = self.engine._classify(event)
+
+        self.assertEqual(detection.source_pps["10.70.0.99"], 0.5)
+        for s in sources:
+            self.assertEqual(detection.source_pps[s.src_ip], 3628.9)
+        # same contributors as source_domains (unfiltered), not the same
+        # as the already-filtered `sources` list.
+        self.assertEqual(set(detection.source_pps), set(detection.source_domains))
+
     def test_mobile_source_is_never_dropped_by_the_floor(self):
         # Confirmed on a real run (2026-10-18): conntrack under-counts a
         # UE's real send rate over ZMQ badly enough that a genuinely
