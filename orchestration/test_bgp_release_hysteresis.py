@@ -76,12 +76,12 @@ class BgpReleaseTests(unittest.TestCase):
         key = self._block_it()
         # 60s of continuous offered load (>> the old 30s fixed hold).
         for _ in range(120):
-            self.assertEqual(self._tick(_correlated(900.0)), [])
+            self.assertEqual(self._tick(_correlated(527097.51)), [])
         self.assertIn(key, self.controller._active_mobile_blocks)
 
     def test_released_after_quiet_window_only(self):
         key = self._block_it()
-        self._tick(_correlated(900.0))                 # last offered load seen
+        self._tick(_correlated(527097.51))                 # last offered load seen
         for _ in range(15):                            # 7.5s quiet < 8s
             self.assertEqual(self._tick(_correlated(None)), [])
         out = []
@@ -96,13 +96,13 @@ class BgpReleaseTests(unittest.TestCase):
         key = self._block_it()
         # nfcapd bursts every ~2s: 1 cycle with load, 3 empty, repeated.
         for _ in range(10):
-            self._tick(_correlated(900.0))
+            self._tick(_correlated(527097.51))
             for _ in range(3):
                 self.assertEqual(self._tick(_correlated(None)), [])
         self.assertIn(key, self.controller._active_mobile_blocks)
 
     def test_load_below_release_threshold_counts_as_quiet(self):
-        # "*" block: threshold = DIST_PPS_THRESHOLD * UNBLOCK_RATIO = 150 pps
+        # "*" block: threshold = DIST_PPS_THRESHOLD * UNBLOCK_RATIO = 87849.585 pps (THRESHOLD_CALIBRATION_RESULT_V2.md)
         key = self._block_it()
         out = []
         for _ in range(20):
@@ -114,15 +114,15 @@ class BgpReleaseTests(unittest.TestCase):
         key = self._block_it(protocol="UDP", dst_port=53)
         out = []
         for _ in range(20):
-            out += self._tick(_correlated(900.0, protocol="ICMP", dst_port=0))
-            out += self._tick(_correlated(900.0, protocol="UDP", dst_port=9999))
+            out += self._tick(_correlated(527097.51, protocol="ICMP", dst_port=0))
+            out += self._tick(_correlated(527097.51, protocol="UDP", dst_port=9999))
         self.assertEqual(len(out), 1)
         self.assertNotIn(key, self.controller._active_mobile_blocks)
 
     def test_tcp_syn_telemetry_matches_a_tcp_block(self):
         key = self._block_it(protocol="TCP", dst_port=443)
         for _ in range(40):
-            self.assertEqual(self._tick(_correlated(900.0, protocol="TCP_SYN", dst_port=443)), [])
+            self.assertEqual(self._tick(_correlated(527097.51, protocol="TCP_SYN", dst_port=443)), [])
         self.assertIn(key, self.controller._active_mobile_blocks)
 
     def test_per_source_block_only_counts_its_own_source(self):
@@ -130,7 +130,7 @@ class BgpReleaseTests(unittest.TestCase):
         # Single-source threshold for UDP is 200 -> release below 100 pps.
         out = []
         for _ in range(20):
-            out += self._tick(_correlated(900.0, src="10.30.0.99"))
+            out += self._tick(_correlated(527097.51, src="10.30.0.99"))
         self.assertEqual(len(out), 1)
         self.assertNotIn(key, self.controller._active_mobile_blocks)
 
@@ -150,7 +150,7 @@ class BgpReleaseTests(unittest.TestCase):
         key = self._block_it()
         out = []
         for _ in range(20):
-            out += self._tick(_correlated(900.0, domain="enterprise"))
+            out += self._tick(_correlated(527097.51, domain="enterprise"))
         self.assertEqual(len(out), 1)
         self.assertNotIn(key, self.controller._active_mobile_blocks)
 
