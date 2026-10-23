@@ -120,14 +120,16 @@ class EnterpriseActivationTests(unittest.TestCase):
             self.assertEqual(self._cycle([_bgp_flood()]), [])
 
     def test_multidomain_detection_is_not_delayed(self):
-        ev_e = TelemetryEvent(domain="enterprise", device_id="1", src_ip="10.70.0.11", dst_ip=DST,
-                              dst_port=53, protocol="UDP", pps=300.0, bps=1)
-        ev_b = TelemetryEvent(domain="bgp", device_id="r1", src_ip="10.30.0.2", dst_ip=DST,
-                              dst_port=53, protocol="UDP", pps=300.0, bps=1)
+        # protocol="IP" (not one of _PROTOCOL_CHECKS' SYN/UDP/ICMP) so this
+        # only ever reaches _classify_distributed's DIST_PPS_THRESHOLD gate,
+        # never a per-protocol one -- with DIST_PPS_THRESHOLD recalibrated
+        # above UDP_THRESHOLD (THRESHOLD_CALIBRATION_RESULT_V2.md), a UDP
+        # group could no longer reach this fallback at all (its own
+        # UDP_THRESHOLD would always fire first).
         ev_x = [TelemetryEvent(domain=d, device_id="x", src_ip=f"10.9.0.{i}", dst_ip=DST,
-                               dst_port=53, protocol="UDP", pps=300.0, bps=1)
+                               dst_port=53, protocol="IP", pps=42167.8008, bps=1)
                 for i, d in enumerate(("enterprise", "bgp", "enterprise", "bgp", "enterprise"))]
-        corr = CorrelatedEvent(dst_ip=DST, total_pps=1500.0, total_bps=1,
+        corr = CorrelatedEvent(dst_ip=DST, total_pps=42167.8008 * 5, total_bps=1,
                                domains=["enterprise", "bgp"], events=ev_x)
         out = self._cycle([corr])
         self.assertEqual([d.attack_type for d in out], ["MULTIDOMAIN_DISTRIBUTED_ATTACK"])

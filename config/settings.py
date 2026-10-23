@@ -12,9 +12,9 @@ LAB_CALIBRATION_MODE = os.getenv("LAB_CALIBRATION_MODE", "false").lower() == "tr
 # exercised with real switches again.
 COLLECT_INTERVAL = 0.5
 
-SYN_THRESHOLD = 76.82
-UDP_THRESHOLD = 14515.64
-ICMP_THRESHOLD = 240.37
+SYN_THRESHOLD = 85.238
+UDP_THRESHOLD = 13601.981
+ICMP_THRESHOLD = 355.78
 
 DECISION_THRESHOLD = 1.5
 
@@ -81,7 +81,7 @@ VALIDATED_FLOW_HARD_TIMEOUT = 30
 # source IPs — the classic signature of a spoofed-source volumetric flood.
 DIST_MIN_SOURCES = 5          # need at least this many distinct sources
 DIST_ENTROPY_THRESHOLD = 0.7  # normalized Shannon entropy (0-1) of src distribution
-DIST_PPS_THRESHOLD = 300      # aggregate pps across all sources toward one dst
+DIST_PPS_THRESHOLD = 175699.17
 
 # Floor (pps) a single source must clear to be INCLUDED in a distributed
 # detection's own `sources` list (detection/engine.py's _build_result/

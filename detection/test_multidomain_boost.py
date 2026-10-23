@@ -45,7 +45,7 @@ class SingleSourceBoostTests(unittest.TestCase):
 
     def test_unboosted_even_when_the_group_also_has_another_domains_benign_traffic(self):
         # Enterprise UDP flood well past UDP_THRESHOLD (200): 600pps -> score 3.0.
-        attacker = _event("enterprise", "10.70.0.11", "UDP", 43546.92)
+        attacker = _event("enterprise", "10.70.0.11", "UDP", 40805.943)
         # Benign mobile SYN traffic toward the SAME dst_ip, same cycle, far
         # below SYN_THRESHOLD (10) -- never itself a detection, but its mere
         # presence used to be enough (via CorrelatedEvent.domains) to boost
@@ -125,7 +125,7 @@ class DistributedBoostTests(unittest.TestCase):
         # "mobile" below, even though no mobile EVENT is actually present
         # -- the only way to prove the code isn't reading that field at
         # all for this decision).
-        sources = [_event("enterprise", f"10.70.0.{i}", "IP", 80.0) for i in range(1, 6)]
+        sources = [_event("enterprise", f"10.70.0.{i}", "IP", 46735.97922) for i in range(1, 6)]
         event = _correlated(sources, domains=["enterprise", "mobile"])
 
         detection = self.engine._classify(event)
