@@ -83,7 +83,8 @@ class ObservedBenignRatesTests(unittest.TestCase):
         events = [_event("enterprise", "IP", 80.0, src=f"10.70.0.{i}") for i in range(1, 6)]
         correlated = _correlated(events, ["enterprise"])
         engine = DDoSDetectionEngine()
-        with unittest.mock.patch.object(settings, "DIST_MIN_SOURCES", 1):
+        with unittest.mock.patch.object(settings, "DIST_MIN_SOURCES", 1), \
+             unittest.mock.patch.object(settings, "DIST_PPS_THRESHOLD", 1.0):
             detection = engine._classify(correlated)
         self.assertIsNotNone(detection)
         self.assertEqual(detection.pps, 400.0)
