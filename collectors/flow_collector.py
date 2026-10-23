@@ -102,12 +102,16 @@ class FlowCollector:
 
             stat, src_ip, dst_ip, proto, dst_port = entries[0]
             prev = prev_snapshot.get(key)
+            syn_only = stat.priority == settings.SYN_TWIN_PRIORITY
+            duration_sec = getattr(stat, "duration_sec", None)
 
             if prev is None:
                 self.prev_flows[key] = {
                     "bytes": stat.byte_count,
                     "packets": stat.packet_count,
-                    "time": now
+                    "time": now,
+                    "duration_sec": duration_sec,
+                    "zero_streak": 0,
                 }
                 continue
 
@@ -128,9 +132,64 @@ class FlowCollector:
                 self.prev_flows[key] = {
                     "bytes": stat.byte_count,
                     "packets": stat.packet_count,
-                    "time": now
+                    "time": now,
+                    "duration_sec": duration_sec,
+                    "zero_streak": 0,
                 }
                 continue
+
+            # same_instance: this flow entry's own OVS-reported age grew by
+            # about as much as our own polling interval did, confirming
+            # it's still the SAME flow (not a hard_timeout'd one silently
+            # replaced with a fresh, identically-keyed entry -- duration_sec
+            # would reset close to 0 for that case instead). Only relevant
+            # for the stuck-twin-counter check below; never gates a normal
+            # rate computation.
+            same_instance = (
+                duration_sec is not None and prev.get("duration_sec") is not None
+                and duration_sec >= prev["duration_sec"]
+            )
+
+            if packet_delta == 0 and syn_only and same_instance:
+                # Confirmed live on the real network (see docs/
+                # SYN_TWIN_COUNTER_STALL.md): the SYN twin rule's own
+                # OpenFlow-level packet counter can freeze at whatever it
+                # read on its first poll after installation and never grow
+                # again for the rest of that flow entry's lifetime, even
+                # while real bare-SYN traffic keeps arriving and the OVS
+                # kernel datapath (a separate counter, `ovs-appctl dpctl/
+                # dump-flows`) keeps counting it correctly -- an OVS
+                # kernel/userspace revalidator race around flow_mod
+                # install time, not a bug in this collector or in
+                # forwarding/learning_switch.py's flow-install logic
+                # (confirmed live: the SAME rule, reinstalled moments
+                # later, counted a fresh flood perfectly from 0 onward,
+                # with no code change in between). Not fixable here --
+                # only detectable. STUCK_STREAK_THRESHOLD consecutive
+                # zero-growth cycles on the SAME flow instance means this
+                # cycle's (and every cycle's, until the flow is replaced
+                # or starts growing again) sample is unreliable: skip
+                # emitting it entirely, the same "no sample" treatment as
+                # dt-too-small above, rather than reporting a confidently
+                # wrong 0 pps.
+                zero_streak = prev.get("zero_streak", 0) + 1
+                self.prev_flows[key] = {
+                    "bytes": stat.byte_count,
+                    "packets": stat.packet_count,
+                    "time": now,
+                    "duration_sec": duration_sec,
+                    "zero_streak": zero_streak,
+                }
+                if zero_streak >= settings.SYN_TWIN_STUCK_STREAK_THRESHOLD:
+                    continue
+            else:
+                self.prev_flows[key] = {
+                    "bytes": stat.byte_count,
+                    "packets": stat.packet_count,
+                    "time": now,
+                    "duration_sec": duration_sec,
+                    "zero_streak": 0,
+                }
 
             byte_rate = byte_delta / dt
             packet_rate = packet_delta / dt
@@ -143,17 +202,11 @@ class FlowCollector:
                 # True for the SYN twin rule (forwarding/syn_twin.py): all of
                 # this flow's volume is bare SYNs by construction, whatever
                 # any packet-in metadata says about the pair.
-                "syn_only": stat.priority == settings.SYN_TWIN_PRIORITY,
+                "syn_only": syn_only,
                 "byte_rate": byte_rate,
                 "packet_rate": packet_rate,
                 "bytes": stat.byte_count,
                 "packets": stat.packet_count
             })
-
-            self.prev_flows[key] = {
-                "bytes": stat.byte_count,
-                "packets": stat.packet_count,
-                "time": now
-            }
 
         return flows

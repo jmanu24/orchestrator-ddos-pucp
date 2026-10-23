@@ -45,6 +45,19 @@ FORWARDING_PRIORITY = 10
 SYN_TWIN_PRIORITY = FORWARDING_PRIORITY + 1
 SYN_TWIN_ENABLED = True
 
+# collectors/flow_collector.py: consecutive zero-growth polls of the SAME
+# SYN twin flow instance (confirmed via its own OVS-reported duration_sec,
+# not a reinstall) before that flow's sample is treated as unreliable and
+# skipped instead of reported as a confident 0 pps. Confirmed live
+# (THRESHOLD_CALIBRATION_RESULT_V2.md / ATTACK_PLAN_V2_VALIDATION.md): an
+# OVS kernel/userspace revalidator race around flow_mod install time can
+# freeze the twin rule's OpenFlow-level packet counter indefinitely while
+# real bare-SYN traffic keeps flowing and the kernel datapath (a separate
+# counter) keeps counting it correctly -- not fixable from this collector,
+# only detectable. 2, not 1: a single zero-growth poll is routine (e.g.
+# the attack pausing between plan events), nothing to flag.
+SYN_TWIN_STUCK_STREAK_THRESHOLD = 2
+
 # Minimum elapsed time (seconds) between two samples of the same flow
 # before FlowCollector trusts the resulting rate. Two OFPFlowStatsReply
 # messages can land back-to-back (e.g. two switches replying close
