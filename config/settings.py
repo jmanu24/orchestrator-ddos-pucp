@@ -120,7 +120,19 @@ DIST_PPS_THRESHOLD = 175699.17
 # mobile already has its own KPM-based activation gate deciding whether
 # a UE is attacking at all, so this floor would only ever drop a true
 # positive from it, never filter noise.
-DIST_PER_SOURCE_MIN_PPS = 1.0
+#
+# Raised 2026-10-23 (PILOT2_RESULT.md): 1.0 was never measured against
+# real benign noise, only reasoned about -- confirmed too low once
+# DetectionResult.source_pps (pure observability, same commit) exposed
+# every composition3/C4 live run blocking non-attacker IPs. A live
+# capture after fixing that run's own infra issues (seed=204,
+# composition3_f07, C4) gave real per-source pps for both: attackers
+# 8.00-14.58pps, co-located benign bystanders 0.50-1.00pps -- a clean
+# 8x gap. 4.0 sits at that gap's midpoint: ~2x margin under the
+# weakest observed attacker, ~4x margin over the noisiest observed
+# bystander. n=1 capture, so this is a first calibration, not a final
+# one -- revisit with more captures before relying on it heavily.
+DIST_PER_SOURCE_MIN_PPS = 4.0
 
 # Minimum conntrack pps a mobile flow must carry to be considered the
 # "carrier" of a UE's KPM-flagged attack (DDoSDetectionEngine.
