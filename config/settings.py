@@ -124,15 +124,25 @@ DIST_PPS_THRESHOLD = 175699.17
 # Raised 2026-10-23 (PILOT2_RESULT.md): 1.0 was never measured against
 # real benign noise, only reasoned about -- confirmed too low once
 # DetectionResult.source_pps (pure observability, same commit) exposed
-# every composition3/C4 live run blocking non-attacker IPs. A live
-# capture after fixing that run's own infra issues (seed=204,
-# composition3_f07, C4) gave real per-source pps for both: attackers
-# 8.00-14.58pps, co-located benign bystanders 0.50-1.00pps -- a clean
-# 8x gap. 4.0 sits at that gap's midpoint: ~2x margin under the
-# weakest observed attacker, ~4x margin over the noisiest observed
-# bystander. n=1 capture, so this is a first calibration, not a final
-# one -- revisit with more captures before relying on it heavily.
-DIST_PER_SOURCE_MIN_PPS = 4.0
+# every composition3/C4 live run blocking non-attacker IPs.
+#
+# Two live captures so far (seed=204, composition3_f07, C4), both AFTER
+# fixing that run's own infra issues:
+#   capture 1: attackers 8.00-14.58pps, bystanders 0.50-1.00pps.
+#   capture 2 (with the floor already raised to 4.0): attackers
+#     7.00-17.09pps, bystanders 0.50-5.70pps -- one non-mobile enterprise
+#     bystander (10.70.0.15) alone landed at 5.70pps, well above the
+#     first capture's own range, and above 4.0's own margin.
+# Across both: weakest non-mobile attacker observed 7.00pps, noisiest
+# non-mobile bystander observed 5.70pps -- only a 1.3pps gap, not the
+# 8x gap capture 1 alone suggested. 6.5 sits at that gap's midpoint.
+# n=2 captures, margin genuinely this tight so far -- NOT a confident
+# final calibration, revisit with more captures (ideally spanning more
+# of a day's traffic variance, not two captures minutes apart) before
+# relying on it heavily. Mobile sources stay exempt regardless (see
+# _blockable_sources' own docstring) -- this floor never decides
+# whether a mobile UE is in `sources`.
+DIST_PER_SOURCE_MIN_PPS = 6.5
 
 # Minimum conntrack pps a mobile flow must carry to be considered the
 # "carrier" of a UE's KPM-flagged attack (DDoSDetectionEngine.
