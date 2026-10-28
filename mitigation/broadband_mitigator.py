@@ -53,6 +53,7 @@ import subprocess
 from typing import Optional
 
 import config.settings as settings
+from core.experiment_audit import emit as audit_emit
 from core.log_format import log_line
 from core.models import MitigationAction
 from core.ssh_utils import run_ssh as _ssh
@@ -149,6 +150,21 @@ class BngMitigator(MitigationAdapter):
 
         self._logger.warning(f"[BROADBAND] {'block' if is_block else 'unblock'} mac={action.mac} "
               f"(src_ip={action.src_ip}, attack_type={action.attack_type})")
+
+        # Unlike mobile/peering, apply() already runs synchronously
+        # end-to-end and checks real exit status at every step
+        # (accel-cmd's returncode, then _set_mac_rejected's own SSH'd
+        # write-and-verify) -- ok=True here means the subscriber's
+        # session was genuinely terminated over RADIUS AND the persistent
+        # reject marker is confirmed in place, not just "a command was
+        # sent". That is real dataplane installation, so emit it only for
+        # the block path, once we know ok reflects BOTH checks above.
+        if is_block and ok:
+            audit_emit(
+                self._logger, 'mitigation_installed',
+                domain=self.domain_name,
+                action=dict(src_ip=action.src_ip, mac=action.mac, attack_type=action.attack_type),
+            )
         return ok
 
     # ------------------------------------------------------------------
