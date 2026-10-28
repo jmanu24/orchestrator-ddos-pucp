@@ -33,15 +33,27 @@ requires for those states.
 """
 import logging
 import os
+import shlex
+import subprocess
 import time
 from typing import Dict, Optional, Tuple
 
+from eventlet import tpool
+
 import config.settings as settings
+from core.experiment_audit import emit as audit_emit
 from core.log_format import log_line
 from core.models import MitigationAction
 from mitigation.base import MitigationAdapter
 
 _PROTO_NAMES = {"TCP": "tcp", "UDP": "udp", "ICMP": "icmp"}
+
+# nftables table/chain flow.service.j2 (deploy/vm-lab/ansible/roles/br)
+# actually installs discard rules into -- see flowspec-hooks.sh.j2 and
+# docs/peering-plan.md §2.2's captured `nft list ruleset` output for the
+# exact rule shape this is matched against.
+_NFT_TABLE = "inet flowspecs"
+_NFT_CHAIN = "flowspecs"
 
 
 class PeeringBackend(MitigationAdapter):
@@ -93,6 +105,7 @@ class PeeringBackend(MitigationAdapter):
             "bgp", "MITIGATION", "FLOWSPEC_ANNOUNCED",
             f"destination={dst_ip}:{dst_port}/{protocol}",
         ))
+        self._spawn_install_verification(dst_ip, dst_port, protocol)
         return True
 
     def withdraw(self, dst_ip: str, dst_port: int, protocol: str) -> bool:
@@ -116,6 +129,106 @@ class PeeringBackend(MitigationAdapter):
         confirm the BGP session to r1 is established.
         """
         return bool(self.fifo_path) and os.path.exists(self.fifo_path)
+
+    # ------------------------------------------------------------------
+    # Real dataplane-installation confirmation (tI, HE3 / tesis Tabla 3.6)
+    # ------------------------------------------------------------------
+    #
+    # announce()/_send() only ever confirm the FIFO write succeeded -- per
+    # this module's own docstring, that is DISPATCHED/ACCEPTED, not
+    # APPLIED/VERIFIED. docs/peering-plan.md §2.2 already proved `flow`
+    # does install a real nftables rule (captured there with a plain `nft
+    # list ruleset` against a standalone spike), and bgp_adapter.py's own
+    # docstring names that exact gap: "confirmed... but only against a
+    # standalone spike, not yet against `br` in the VM lab". This is that
+    # first real integration.
+    #
+    # Deliberately NOT inline in announce()/apply_mitigation(): this
+    # domain's own telemetry collector (collectors/peering_flow_
+    # collector.py) documents, from a real prior incident, that an SSH
+    # round trip to `br` on every pipeline cycle was the dominant cost of
+    # this domain's cycle time and was removed from the hot path for
+    # exactly that reason. Re-adding one unconditionally here would
+    # reintroduce that regression -- for every attack, not just this
+    # domain's. So this runs in its own greenthread, spawned ONCE per
+    # newly-announced block (announce() is already idempotent on repeat
+    # calls for the same key), bounded to a handful of retries, and never
+    # blocks apply_mitigation()'s return -- a slow or unreachable `br`
+    # can delay only this domain's own tI measurement, never detection or
+    # mitigation dispatch for any domain.
+
+    def _spawn_install_verification(self, dst_ip: str, dst_port: int, protocol: str) -> None:
+        try:
+            from ryu.lib import hub
+        except ImportError:
+            # Standalone/test context (no Ryu reactor) -- nothing to
+            # spawn into. tI simply stays unconfirmed, same as before
+            # this method existed.
+            return
+        hub.spawn(self._verify_installed_background, dst_ip, dst_port, protocol)
+
+    def _verify_installed_background(
+        self, dst_ip: str, dst_port: int, protocol: str,
+        attempts: int = 6, interval_s: float = 0.5, ssh_timeout_s: float = 2.0,
+    ) -> None:
+        from ryu.lib import hub
+        key = (dst_ip, dst_port, protocol)
+        for _ in range(attempts):
+            if key not in self._active:
+                return  # withdrawn (or never truly active) before confirmation
+            if self._check_nft_rule(dst_ip, dst_port, protocol, ssh_timeout_s):
+                audit_emit(
+                    self.logger, 'mitigation_installed', domain='bgp',
+                    action=dict(dst_ip=dst_ip, dst_port=dst_port, protocol=protocol),
+                )
+                return
+            hub.sleep(interval_s)
+        self.logger.warning(log_line(
+            "bgp", "MITIGATION", "INSTALL_UNCONFIRMED",
+            f"destination={dst_ip}:{dst_port}/{protocol} -- nftables rule on br "
+            f"never observed within {attempts * interval_s:.1f}s",
+        ))
+
+    def _check_nft_rule(self, dst_ip: str, dst_port: int, protocol: str, timeout_s: float) -> bool:
+        """One SSH round trip reading br's real `flowspecs` nftables chain,
+        off the hot path (see class-level note above). ControlMaster/
+        ControlPersist (same convention as telemetry/broadband_adapter.py's
+        own _ssh()) keeps repeat calls -- across different announce()s --
+        cheap; only the very first ever pays full handshake cost."""
+        user = getattr(settings, 'PEERING_DIST_BR_SSH_USER', None)
+        host = getattr(settings, 'PEERING_DIST_BR_SSH_HOST', None)
+        if not user or not host:
+            return False
+        args = ["nft", "list", "chain"] + shlex.split(_NFT_TABLE) + [_NFT_CHAIN]
+        try:
+            result = tpool.execute(
+                subprocess.run,
+                ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={min(timeout_s, 5):.0f}",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "ControlMaster=auto", "-o", "ControlPersist=600",
+                 "-o", "ControlPath=/run/ssh-mux-peering-%C",
+                 f"{user}@{host}", shlex.join(args)],
+                capture_output=True, text=True, timeout=timeout_s,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.logger.warning(log_line(
+                "bgp", "MITIGATION", "INSTALL_CHECK_FAILED",
+                f"destination={dst_ip}:{dst_port}/{protocol} err={exc}",
+            ))
+            return False
+        if result.returncode != 0:
+            return False
+        proto_name = _PROTO_NAMES.get(protocol)
+        needle_ip = f"ip daddr {dst_ip} "
+        for line in result.stdout.splitlines():
+            if needle_ip not in line:
+                continue
+            if proto_name and proto_name not in line:
+                continue
+            if dst_port and f"{{ {dst_port} }}" not in line and f"dport {dst_port}" not in line:
+                continue
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -171,6 +171,20 @@ class OrchestrationController:
         # threshold. Reset to 0 whenever traffic rises back above it.
         self._below_threshold_streak: Dict[Tuple[str, str, int, str], int] = {}
 
+        # Keys for which a 'mitigation_installed' audit event has already
+        # been emitted -- record_block_traffic() must fire it exactly once
+        # per block, the first time a switch's flow_stats_reply actually
+        # reports counters for that block's drop rule. Unlike
+        # 'mitigation_issued' (which only means _dispatch's call into
+        # of_mitigator.block() returned True -- i.e. the flow_mod was
+        # SENT), a flow_stats_reply naming this rule means the switch has
+        # genuinely programmed it into its flow table: real dataplane
+        # installation, not just a backend-dispatch handshake. This is
+        # what response_metrics.py's tI (HE3, tesis Tabla 3.6) needs and
+        # currently has no source for (always reported
+        # reason='not_observable').
+        self._install_confirmed: Set[Tuple[str, str, int, str]] = set()
+
         # (src_ip, dst_ip) flows that have completed at least one full
         # detection cycle without that specific source being flagged as
         # part of an attack toward that destination. LearningSwitch refuses
@@ -1142,6 +1156,17 @@ class OrchestrationController:
                 }
 
                 if prev is None:
+                    if key not in self._install_confirmed:
+                        self._install_confirmed.add(key)
+                        src_ip, dst_ip, dst_port, protocol = key
+                        audit_emit(
+                            self._logger, 'mitigation_installed',
+                            domain='enterprise', dpid=dpid,
+                            action=dict(
+                                src_ip=src_ip, dst_ip=dst_ip,
+                                dst_port=dst_port, protocol=protocol,
+                            ),
+                        )
                     break
 
                 dt = now - prev["time"]
@@ -1185,6 +1210,7 @@ class OrchestrationController:
 
     def _forget_block_traffic(self, key) -> None:
         self._block_pps.pop(key, None)
+        self._install_confirmed.discard(key)
         for sample_key in [k for k in self._block_traffic_samples if k[0] == key]:
             del self._block_traffic_samples[sample_key]
 
